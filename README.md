@@ -9,6 +9,8 @@
 > the correct devices. This software is provided "as is", without warranty of
 > any kind (see [LICENSE](LICENSE)).
 
+![SalvageMap imaging a drive: the live sector map filling in green, the status panel, the targeted-recovery workflow, and the ddrescue log.](docs/screenshot.png)
+
 A Linux GUI wrapper over [GNU ddrescue](https://www.gnu.org/software/ddrescue/),
 in the style of FTK / DMDE / Data Extractor:
 
@@ -25,12 +27,25 @@ in the style of FTK / DMDE / Data Extractor:
   | --- | --- | --- |
   | **NTFS** | boot sector → `$MFT` record 0 (own runs) → full `$MFT` → every directory's `$INDEX_ALLOCATION` | all allocated `$DATA` (resident small files already in the `$MFT`) |
   | **ext4** | superblock → group descriptor table → every inode table → every directory's data blocks | every regular file's extents (ext3/ext2 indirect-block files are counted but skipped) |
-  | **HFS+** | volume header → Catalog B-tree → Extents Overflow file | every file's data-fork extents (compressed/resource-fork files are counted but skipped) |
+  | **HFS+** | volume header → Extents Overflow file → Catalog B-tree | every file's data-fork extents (compressed/resource-fork files are counted but skipped) |
 
   Each phase runs `ddrescue --domain-mapfile` into the same image + logfile, so
   the sector map fills in cumulatively. Free space is always skipped. **File ▸
   Export file-data Domain File** writes the best domain file so you can re-run
   `ddrescue -m` manually with your own settings.
+
+- **Fragmentation-aware** — a large, heavily-fragmented file (e.g. video) scatters
+  its data across the disk, and the map of *where* often lives in a secondary
+  structure: the HFS+ **Extents Overflow file**, an NTFS **`$ATTRIBUTE_LIST`** /
+  extension records, or a deep ext4 **extent tree**. SalvageMap resolves those so
+  a folder's domain includes every scattered extent, not just the first few. When
+  that map can't be fully resolved yet (the metadata holding it isn't imaged), the
+  file is flagged rather than silently truncated.
+- **Per-file recovery status** — in the paused **Show Files** view each entry gets
+  a coloured box: clear = not imaged, light green = partial, **dark green = fully
+  recovered**, amber = as complete as the current map allows but known-incomplete,
+  red = tried but unreadable. Right-click a folder to **image it first**, or run a
+  final completeness pass to retry everything not yet whole.
 
 ## Requirements
 
@@ -73,10 +88,13 @@ then **Resume** to continue ddrescue from where it left off.
 ```
 app/
   main.py                     entry point
-  ui/        main_window, sector_map, status_panel, log_panel
-  core/      mapfile (parse/aggregate), domain (domain-mapfile builder),
-             ddrescue_runner (QProcess wrapper + safety guards)
-  ntfs/      runlist, boot_sector, mft, targeted_recovery (4-phase orchestrator)
+  ui/        main_window, sector_map, status_panel, log_panel, file_tree_panel
+  core/      recovery (filesystem-agnostic phase engine + plan interface),
+             mapfile (parse/aggregate), domain (domain-mapfile builder),
+             volume (filesystem detection), ddrescue_runner (QProcess + guards)
+  ntfs/      runlist, boot_sector, mft (incl. $ATTRIBUTE_LIST), filetree, plan
+  ext/       superblock, group_desc, inode, extents, dirent, catalog, plan
+  hfsplus/   volume_header, btree, extents (overflow), catalog, plan
 tests/       unit tests + sample mapfile
 ```
 
