@@ -1,0 +1,43 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f0fdfa" />
+      <stop offset="100%" stop-color="#ccfbf1" />
+    </linearGradient>
+    
+    <linearGradient id="platterTop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5eead4" />
+      <stop offset="100%" stop-color="#2dd4bf" />
+    </linearGradient>
+    <linearGradient id="platterSide" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#0f766e" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+
+  <g transform="translate(0, 50)" filter="url(#shadow)">
+    
+    <path d="M 136 320 A 120 45 0 0 0 376 320 L 376 350 A 120 45 0 0 1 136 350 Z" fill="url(#platterSide)" />
+    <ellipse cx="256" cy="320" rx="120" ry="45" fill="url(#platterTop)" stroke="#0d9488" stroke-width="3"/>
+    
+    <path d="M 136 260 A 120 45 0 0 0 376 260 L 376 290 A 120 45 0 0 1 136 290 Z" fill="url(#platterSide)" />
+    <ellipse cx="256" cy="260" rx="120" ry="45" fill="url(#platterTop)" stroke="#0d9488" stroke-width="3"/>
+
+    <path d="M 136 200 A 120 45 0 0 0 376 200 L 376 230 A 120 45 0 0 1 136 230 Z" fill="url(#platterSide)" />
+    <ellipse cx="256" cy="200" rx="120" ry="45" fill="url(#platterTop)" stroke="#0d9488" stroke-width="3"/>
+
+    <ellipse cx="256" cy="200" rx="24" ry="9" fill="#0f766e" />
+    <ellipse cx="256" cy="203" rx="18" ry="6" fill="#042f2e" opacity="0.6"/>
+  </g>
+
+  <g transform="translate(0, -20)">
+    <path d="M 256 110 C 226 110 202 134 202 164 C 202 208 256 260 256 260 C 256 260 310 208 310 164 C 310 134 286 110 256 110 Z" fill="#fb923c" />
+    <circle cx="256" cy="164" r="16" fill="#ffffff" />
+  </g>
+</svg>

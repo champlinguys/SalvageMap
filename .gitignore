@@ -1,0 +1,27 @@
+# Claude Code — keep all local agent state out of the repo
+.claude/
+**/.claude/
+.claude.json
+CLAUDE.local.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# SalvageMap generated artifacts (in case an image/logfile is ever written
+# inside the repo — normally these live on a separate recovery drive)
+*.dmap
+*.img
+*.log
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
