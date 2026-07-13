@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.core.partition import Partition
+from app.core.partition import Partition, best_recoverable
 from app.ui import theme
 
 COLUMNS = ["#", "Scheme", "Start", "Size", "Type", "Filesystem", "Label"]
@@ -82,21 +82,25 @@ class PartitionDialog(QDialog):
         whole.setData(0, _OFFSET_ROLE, 0)
         self.tree.addTopLevelItem(whole)
 
+        # Auto-target the user's data partition (skips OEM recovery volumes),
+        # so the pre-highlighted choice matches what the workflow would pick.
+        target = best_recoverable(partitions)
         preselect = whole
         for p in partitions:
             fs = p.fs_type.upper() if p.fs_type else ""
+            label = p.label + ("  (recovery)" if p.is_recovery else "")
             item = QTreeWidgetItem([
                 str(p.index), p.scheme.upper(),
                 f"0x{p.start:X} ({_humanize(p.start)})", _humanize(p.size),
-                p.type_name, fs, p.label,
+                p.type_name, fs, label,
             ])
             item.setData(0, _OFFSET_ROLE, p.start)
             item.setData(0, _FS_ROLE, p.fs_type)
-            if p.is_recoverable:
+            if (p.is_recoverable or p.is_data_type) and not p.is_recovery:
                 for col in range(item.columnCount()):
                     item.setForeground(col, theme.qcolor(theme.ACCENT))
-                if preselect is whole:
-                    preselect = item
+            if p is target:
+                preselect = item
             self.tree.addTopLevelItem(item)
 
         self.tree.setCurrentItem(preselect)

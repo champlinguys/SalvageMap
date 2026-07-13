@@ -39,8 +39,54 @@ MBR_TYPE_NAMES = {
     0x05: "Extended", 0x0F: "Extended (LBA)", 0x85: "Linux extended",
     0x07: "NTFS/exFAT", 0x0B: "FAT32", 0x0C: "FAT32 (LBA)", 0x0E: "FAT16 (LBA)",
     0x82: "Linux swap", 0x83: "Linux", 0xEE: "GPT protective", 0xEF: "EFI System",
+    0x27: "Windows Recovery",  # OEM WinRE / hidden NTFS recovery
 }
+# MBR type bytes that hold a recovery/service volume, not user data.
+_MBR_RECOVERY_TYPES = {0x27}
+# MBR type bytes that plausibly hold a user-data filesystem. Used so we can still
+# target a data partition whose boot sector is damaged/unimaged (the type byte
+# survives in the table even when the VBR can't be read).
+_MBR_DATA_TYPES = {0x07, 0x0B, 0x0C, 0x0E, 0x83}
 _EXTENDED_TYPES = {0x05, 0x0F, 0x85}
+
+
+def _guid_bytes(guid: str) -> bytes:
+    """The 16 mixed-endian bytes a GPT stores for a textual type GUID."""
+    a, b, c, d, e = guid.split("-")
+    return (bytes.fromhex(a)[::-1] + bytes.fromhex(b)[::-1] + bytes.fromhex(c)[::-1]
+            + bytes.fromhex(d) + bytes.fromhex(e))
+
+
+# GPT partition *type* GUID -> human name. The type GUID is authoritative for the
+# partition's role (the on-disk NTFS still parses fine, so without this a WinRE
+# recovery volume is indistinguishable from the real Windows data partition).
+_GPT_TYPE_NAMES = {
+    "C12A7328-F81F-11D2-BA4B-00A0C93EC93B": "EFI System",
+    "E3C9E316-0B5C-4DB8-817D-F92DF00215AE": "Microsoft Reserved",
+    "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7": "Windows Basic data",
+    "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC": "Windows Recovery",
+    "0FC63DAF-8483-4772-8E79-3D69D8477DE4": "Linux filesystem",
+    "48465300-0000-11AA-AA11-00306543ECAC": "Apple HFS+",
+    "7C3457EF-0000-11AA-AA11-00306543ECAC": "Apple APFS",
+}
+GPT_TYPE_NAMES = {_guid_bytes(g): name for g, name in _GPT_TYPE_NAMES.items()}
+# Type GUIDs of volumes that hold a recovery/service image, not user data.
+_GPT_RECOVERY_TYPES = {
+    _guid_bytes("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"),  # Windows Recovery
+}
+# Type GUIDs of volumes that plausibly hold a user-data filesystem, so we can
+# still target the Windows partition when its boot sector is damaged/unimaged
+# (the type GUID survives in the GPT even when the VBR can't be read). Excludes
+# EFI System, Microsoft Reserved and recovery volumes.
+_GPT_DATA_TYPES = {
+    _guid_bytes("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),  # Windows Basic data
+    _guid_bytes("0FC63DAF-8483-4772-8E79-3D69D8477DE4"),  # Linux filesystem
+    _guid_bytes("48465300-0000-11AA-AA11-00306543ECAC"),  # Apple HFS+
+    _guid_bytes("7C3457EF-0000-11AA-AA11-00306543ECAC"),  # Apple APFS
+}
+# GPT attribute bit 63 = "do not automount"; OEM recovery volumes set it. We use
+# it only as a secondary hint (below), never to override the type GUID.
+_GPT_ATTR_NO_AUTOMOUNT = 1 << 63
 _GPT_SIGNATURE = b"EFI PART"
 _MBR_BOOT_SIG = b"\x55\xaa"
 
@@ -73,6 +119,8 @@ class Partition:
     fs_type: str        # "ntfs" | "ext" | "" (detected from the volume itself)
     scheme: str         # "mbr" | "gpt"
     label: str = ""
+    is_recovery: bool = False  # OEM/WinRE recovery volume, not user data
+    is_data_type: bool = False  # table says user-data volume (even if VBR unread)
 
     @property
     def end(self) -> int:
@@ -184,6 +232,8 @@ def _parse_mbr(fd: int, mbr: bytes, sector_size: int) -> list[Partition]:
         parts.append(_make_partition(
             fd, idx, start, count * sector_size,
             MBR_TYPE_NAMES.get(ptype, f"0x{ptype:02X}"), "mbr",
+            is_recovery=ptype in _MBR_RECOVERY_TYPES,
+            is_data_type=ptype in _MBR_DATA_TYPES,
         ))
         idx += 1
     return parts
@@ -207,6 +257,7 @@ def _parse_extended(fd, ext_start, sector_size, parts, idx, guard=64) -> int:
             parts.append(_make_partition(
                 fd, idx, start, count * sector_size,
                 MBR_TYPE_NAMES.get(ptype, f"0x{ptype:02X}"), "mbr",
+                is_recovery=ptype in _MBR_RECOVERY_TYPES,
             ))
             idx += 1
         next_lba = int.from_bytes(nxt[8:12], "little")
@@ -232,19 +283,31 @@ def _parse_gpt(fd: int, header: bytes, sector_size: int) -> list[Partition]:
         entry = table[i * entry_size:(i + 1) * entry_size]
         if len(entry) < 128 or entry[0:16] == b"\x00" * 16:
             continue  # unused
+        type_guid = entry[0:16]
         first_lba = int.from_bytes(entry[32:40], "little")
         last_lba = int.from_bytes(entry[40:48], "little")
+        attrs = int.from_bytes(entry[48:56], "little")
         if last_lba < first_lba:
             continue
         name = entry[56:128].decode("utf-16-le", errors="replace").rstrip("\x00")
         start = first_lba * sector_size
         size = (last_lba - first_lba + 1) * sector_size
-        parts.append(_make_partition(fd, idx, start, size, "Basic data", "gpt", name))
+        type_name = GPT_TYPE_NAMES.get(type_guid, "Basic data")
+        # Recovery if the type GUID says so, or a "recovery"-named volume marked
+        # do-not-automount (covers OEM volumes tagged only as Basic data).
+        is_recovery = type_guid in _GPT_RECOVERY_TYPES or (
+            bool(attrs & _GPT_ATTR_NO_AUTOMOUNT) and "recovery" in name.lower()
+        )
+        parts.append(_make_partition(
+            fd, idx, start, size, type_name, "gpt", name, is_recovery=is_recovery,
+            is_data_type=type_guid in _GPT_DATA_TYPES and not is_recovery,
+        ))
         idx += 1
     return parts
 
 
-def _make_partition(fd, idx, start, size, type_name, scheme, label="") -> Partition:
+def _make_partition(fd, idx, start, size, type_name, scheme, label="",
+                    is_recovery=False, is_data_type=False) -> Partition:
     """Build a Partition, identifying its filesystem from the volume itself.
 
     The on-disk partition *type* byte is only a hint; we confirm by probing the
@@ -252,18 +315,47 @@ def _make_partition(fd, idx, start, size, type_name, scheme, label="") -> Partit
     is tagged ``ext`` (and a non-ext Linux partition stays untagged).
     """
     fs_type = _fs_at(fd, start)
-    if fs_type:
+    if fs_type and not is_recovery:
+        # Keep the "Windows Recovery" role visible; only relabel data volumes.
         type_name = FS_LABELS[fs_type]
     return Partition(index=idx, start=start, size=size, type_name=type_name,
-                     fs_type=fs_type, scheme=scheme, label=label)
+                     fs_type=fs_type, scheme=scheme, label=label,
+                     is_recovery=is_recovery, is_data_type=is_data_type)
+
+
+def best_recoverable(parts: list[Partition]) -> Partition | None:
+    """The partition most likely to hold the user's data.
+
+    Naively targeting the *first* recoverable volume grabs the wrong thing on
+    common OEM Windows layouts, where a small WinRE recovery volume physically
+    precedes the real ``C:`` partition. We prefer the largest volume, skipping
+    recovery volumes, in tiers:
+
+    1. Volumes whose filesystem we positively identified (VBR readable).
+    2. Otherwise, volumes the partition *table* marks as user-data (e.g. a
+       "Windows Basic data" GPT entry) — this is how we still find the Windows
+       partition when its boot sector is damaged or not yet imaged, so a full
+       workflow can target it without the user hand-picking in Partition scan.
+    3. Last resort: any recoverable volume, even a recovery one.
+
+    The caller defaults an unidentified data volume to the NTFS plan.
+    """
+    def largest(pool: list[Partition]) -> Partition | None:
+        return max(pool, key=lambda p: p.size) if pool else None
+
+    detected = [p for p in parts if p.is_recoverable and not p.is_recovery]
+    typed = [p for p in parts if p.is_data_type and not p.is_recovery]
+    fallback = [p for p in parts if p.is_recoverable]
+    return largest(detected) or largest(typed) or largest(fallback)
 
 
 def first_recoverable(parts: list[Partition]) -> Partition | None:
-    """First partition holding a filesystem the workflow can recover."""
-    for p in parts:
-        if p.is_recoverable:
-            return p
-    return None
+    """Back-compat alias for the data-partition picker.
+
+    Kept because callers imported this name; it now applies the smarter
+    :func:`best_recoverable` heuristic rather than a literal first-match.
+    """
+    return best_recoverable(parts)
 
 
 def first_ntfs(parts: list[Partition]) -> Partition | None:
