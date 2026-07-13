@@ -25,9 +25,11 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QStackedWidget,
     QStatusBar,
@@ -45,6 +47,7 @@ from app.core.ddrescue_runner import (
     non_sparse_destination,
 )
 from app.core import partition
+from app.core import tree_export
 from app.core.recovery import (
     Phase,
     RecoveryContext,
@@ -55,6 +58,7 @@ from app.core.volume import detect_filesystem
 from app.ui.ddrescue_view import DdrescueView
 from app.ui.device_dialog import DeviceDialog
 from app.ui.file_tree_panel import FileTreePanel
+from app.ui.html_export_dialog import HtmlExportDialog
 from app.ui.import_logfile_dialog import ImportLogfileDialog
 from app.ui.log_panel import LogPanel
 from app.ui.output_dialog import OutputDialog
@@ -143,8 +147,31 @@ class MainWindow(QMainWindow):
         self._tree_placeholder.setAlignment(Qt.AlignCenter)
         self._tree_placeholder.setWordWrap(True)
         self._tree_placeholder.setMargin(16)
+        # Tree page: the browser plus a bottom bar with the customer exports.
+        # Living inside this page means the buttons only show when the files
+        # view is up (i.e. the rescue is stopped/paused) — the placeholder page
+        # covers the running case, so the gating comes for free.
+        tree_page = QWidget()
+        tree_layout = QVBoxLayout(tree_page)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(4)
+        tree_layout.addWidget(self.file_tree)
+        export_bar = QHBoxLayout()
+        export_bar.setContentsMargins(4, 0, 4, 4)
+        export_bar.addStretch(1)
+        self._btn_export_txt = QPushButton("Export to TXT")
+        self._btn_export_html = QPushButton("Export to HTML")
+        self._btn_export_txt.setEnabled(False)
+        self._btn_export_html.setEnabled(False)
+        self._btn_export_txt.clicked.connect(self._export_tree_txt)
+        self._btn_export_html.clicked.connect(self._export_tree_html)
+        export_bar.addWidget(self._btn_export_txt)
+        export_bar.addWidget(self._btn_export_html)
+        tree_layout.addLayout(export_bar)
+
+        self._tree_page = tree_page
         self._tree_stack = QStackedWidget()
-        self._tree_stack.addWidget(self.file_tree)         # index 0: the tree
+        self._tree_stack.addWidget(tree_page)              # index 0: the tree
         self._tree_stack.addWidget(self._tree_placeholder)  # index 1: the hint
         tree_dock.setWidget(self._tree_stack)
         self.addDockWidget(Qt.BottomDockWidgetArea, tree_dock)
@@ -361,7 +388,7 @@ class MainWindow(QMainWindow):
         self._tree_stack.setCurrentWidget(self._tree_placeholder)
 
     def _set_tree_files_view(self) -> None:
-        self._tree_stack.setCurrentWidget(self.file_tree)
+        self._tree_stack.setCurrentWidget(self._tree_page)
 
     def _locate_plan(self):
         """Find the recoverable volume in the image. Returns (plan_or_None, offset).
@@ -375,7 +402,7 @@ class MainWindow(QMainWindow):
         if plan is not None:
             return plan, vol
         try:
-            target = partition.first_recoverable(partition.scan_device(self.output))
+            target = partition.best_recoverable(partition.scan_device(self.output))
         except OSError:
             target = None
         if target is not None:
@@ -411,6 +438,8 @@ class MainWindow(QMainWindow):
             self.log_panel.append_line(f"[file tree] could not build: {exc}")
             return
         self.file_tree.set_tree(tree)
+        self._btn_export_txt.setEnabled(tree is not None)
+        self._btn_export_html.setEnabled(tree is not None)
         if self._last_mapfile is not None:
             self.file_tree.refresh_status(self._last_mapfile)
         self._update_volume_status()
@@ -808,6 +837,91 @@ class MainWindow(QMainWindow):
             f"{self.source or '<device>'} {os.path.basename(self.output)} "
             f"{os.path.basename(self.logfile or '<logfile>')}",
         )
+
+    def _default_export_path(self, suffix: str) -> str:
+        """Default export filename derived from the output image path."""
+        base = os.path.splitext(self.output)[0] if self.output else "recovered-files"
+        return base + suffix
+
+    def _export_tree_txt(self) -> None:
+        """Write the recovered-file tree as a plain, customer-readable TXT."""
+        tree = self.file_tree.tree
+        if tree is None:
+            QMessageBox.information(
+                self, "No files to export",
+                "Show and refresh the recovered files first.",
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export recovered files to TXT",
+            self._default_export_path("-recovered-files.txt"),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            n_ok, n_total = tree_export.export_txt(tree, self._last_mapfile, path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.log_panel.append_line(
+            f"Exported recovered-file list (TXT): {path}  "
+            f"({n_ok}/{n_total} entries recovered)"
+        )
+        QMessageBox.information(self, "Export to TXT", f"Wrote {path}")
+
+    def _export_tree_html(self) -> None:
+        """Write a self-contained, brandable HTML report of the file tree."""
+        tree = self.file_tree.tree
+        if tree is None:
+            QMessageBox.information(
+                self, "No files to export",
+                "Show and refresh the recovered files first.",
+            )
+            return
+        start_dir = os.path.dirname(self.output) if self.output else None
+        dlg = HtmlExportDialog(self, start_dir=start_dir)
+        if not dlg.exec():
+            return
+        logo_uri = self._logo_data_uri(dlg.logo_path())
+        hide_hidden = dlg.hide_hidden_files()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export recovered files to HTML",
+            self._default_export_path("-recovered-files.html"),
+            "HTML files (*.html);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            n_ok, n_total = tree_export.export_html(
+                tree, self._last_mapfile, path, logo_data_uri=logo_uri,
+                hide_hidden=hide_hidden)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.log_panel.append_line(
+            f"Exported recovered-file report (HTML): {path}  "
+            f"({n_ok}/{n_total} entries recovered)"
+        )
+        QMessageBox.information(self, "Export to HTML", f"Wrote {path}")
+
+    def _logo_data_uri(self, logo_path: str | None) -> str | None:
+        """Read ``logo_path`` and encode it as an embeddable ``data:`` URI."""
+        if not logo_path:
+            return None
+        import base64
+        import mimetypes
+        try:
+            with open(logo_path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Logo not embedded",
+                f"Could not read the logo ({exc}); exporting without it.",
+            )
+            return None
+        mime = mimetypes.guess_type(logo_path)[0] or "image/png"
+        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
     def _edit_settings(self) -> None:
         dlg = SettingsDialog(self.settings, self)
