@@ -205,12 +205,10 @@ def test_build_file_tree_from_image(tmp_path):
 
 # --- status box classifier (needs Qt) ------------------------------------
 def test_state_for_classifier():
-    pytest.importorskip("PySide6.QtWidgets")
-    from PySide6.QtWidgets import QApplication
+    from app.core import tree_status
+    from app.core.tree_status import CLEAR, DARK, LIGHT
     from app.ntfs.filetree import FileNode
-    from app.ui.file_tree_panel import CLEAR, DARK, LIGHT, FileTreePanel
 
-    _ = QApplication.instance() or QApplication([])
     mf = Mapfile(blocks=[Block(0, 1000, "+"), Block(1000, 1000, "?")])
     idx = FinishedIndex.from_mapfile(mf)
 
@@ -219,20 +217,17 @@ def test_state_for_classifier():
     none = FileNode(3, "c", False, 5, ranges=[(1000, 1000)])
     partial = FileNode(4, "d", False, 5, ranges=[(0, 500), (1000, 500)])
 
-    assert FileTreePanel._state_for(resident, idx) == DARK
-    assert FileTreePanel._state_for(full, idx) == DARK
-    assert FileTreePanel._state_for(none, idx) == CLEAR
-    assert FileTreePanel._state_for(partial, idx) == LIGHT
+    assert tree_status.node_state(resident, idx) == DARK
+    assert tree_status.node_state(full, idx) == DARK
+    assert tree_status.node_state(none, idx) == CLEAR
+    assert tree_status.node_state(partial, idx) == LIGHT
 
 
 def test_classify_states():
-    pytest.importorskip("PySide6.QtWidgets")
-    from PySide6.QtWidgets import QApplication
-    from app.ui.file_tree_panel import BAD, CLEAR, DARK, LIGHT, FileTreePanel
+    from app.core.tree_status import BAD, CLEAR, DARK, LIGHT, classify
 
-    _ = QApplication.instance() or QApplication([])
-    c = FileTreePanel._classify
-    assert c(0, 0, 0) == DARK           # nothing on disk -> in $MFT
+    c = classify
+    assert c(0, 0, 0) == DARK           # nothing on disk -> in metadata
     assert c(1000, 0, 1000) == DARK     # fully finished
     assert c(400, 0, 1000) == LIGHT     # partial
     assert c(0, 1000, 1000) == BAD      # tried, unreadable
@@ -268,43 +263,42 @@ def test_expanded_children_coloured_immediately():
 
 
 def test_directory_rollup_reflects_children():
-    pytest.importorskip("PySide6.QtWidgets")
-    from PySide6.QtWidgets import QApplication
+    from app.core import tree_status
+    from app.core.tree_status import BAD, DARK, LIGHT, classify
     from app.ntfs.filetree import FileNode, FileTree
-    from app.ui.file_tree_panel import BAD, DARK, LIGHT, FileTreePanel
 
-    _ = QApplication.instance() or QApplication([])
     nodes = {
         5: FileNode(5, "\\", True, 5, ranges=[], children=[10]),
         10: FileNode(10, "Docs", True, 5, ranges=[(0, 1000)], children=[11]),
         11: FileNode(11, "report.txt", False, 10, ranges=[(2000, 1000)]),
     }
-    panel = FileTreePanel()
-    panel.set_tree(FileTree(nodes=nodes, root=5))
+    tree = FileTree(nodes=nodes, root=5)
 
     # Folder index recovered but the file inside is not -> folder is partial.
     idx = FinishedIndex.from_mapfile(
         Mapfile(blocks=[Block(0, 1000, "+"), Block(1000, 2000, "?")]))
-    roll = panel._rollup(idx)
+    roll = tree_status.rollup(tree, idx)
     assert roll[10] == (1000, 0, 2000, 0)   # (finished, bad, total, incomplete)
-    assert panel._classify(*roll[10]) == LIGHT
+    assert classify(*roll[10]) == LIGHT
 
     # File's sectors are bad on a finished run -> folder still partial (LIGHT),
     # but a fully-bad file shows red.
     idx_bad = FinishedIndex.from_mapfile(
         Mapfile(blocks=[Block(0, 1000, "+"), Block(2000, 1000, "-")]))
-    assert panel._state_for(nodes[11], idx_bad) == BAD
+    assert tree_status.node_state(nodes[11], idx_bad) == BAD
 
     # Once the file is recovered too, the folder is complete.
     idx2 = FinishedIndex.from_mapfile(Mapfile(blocks=[Block(0, 3000, "+")]))
-    assert panel._classify(*panel._rollup(idx2)[10]) == DARK
+    assert classify(*tree_status.rollup(tree, idx2)[10]) == DARK
 
 
 def test_incompletely_mapped_file_never_shows_complete():
     pytest.importorskip("PySide6.QtWidgets")
     from PySide6.QtWidgets import QApplication
+    from app.core import tree_status
+    from app.core.tree_status import AMBER, DARK, classify
     from app.ntfs.filetree import FileNode, FileTree
-    from app.ui.file_tree_panel import AMBER, DARK, FileTreePanel
+    from app.ui.file_tree_panel import FileTreePanel
 
     _ = QApplication.instance() or QApplication([])
     nodes = {
@@ -314,17 +308,19 @@ def test_incompletely_mapped_file_never_shows_complete():
                      fully_mapped=False),
         12: FileNode(12, "note.txt", False, 5, ranges=[(4000, 1000)]),
     }
-    panel = FileTreePanel()
-    panel.set_tree(FileTree(nodes=nodes, root=5))
+    tree = FileTree(nodes=nodes, root=5)
 
     # Even with every mapped byte finished, an unmapped file caps at amber, and
     # the root folder containing it inherits amber rather than dark green.
     idx = FinishedIndex.from_mapfile(Mapfile(blocks=[Block(0, 5000, "+")]))
-    assert panel._state_for(nodes[10], idx) == AMBER
-    assert panel._state_for(nodes[12], idx) == DARK
-    assert panel._classify(*panel._rollup(idx)[5]) == AMBER
+    assert tree_status.node_state(nodes[10], idx) == AMBER
+    assert tree_status.node_state(nodes[12], idx) == DARK
+    assert classify(*tree_status.rollup(tree, idx)[5]) == AMBER
 
-    # The final-pass report lists the unmapped file and unions the retry ranges.
+    # The final-pass report (still on the panel) lists the unmapped file and
+    # unions the retry ranges.
+    panel = FileTreePanel()
+    panel.set_tree(tree)
     ranges, n_unfinished, n_unmapped = panel.incomplete_report(
         Mapfile(blocks=[Block(0, 1000, "+"), Block(4000, 1000, "?")]))
     assert n_unmapped == 1                 # clip.mov

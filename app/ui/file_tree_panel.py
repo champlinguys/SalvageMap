@@ -41,13 +41,13 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.mapfile import FinishedIndex
+from app.core import tree_status
+from app.core.tree_status import CLEAR, LIGHT, DARK, AMBER, BAD
 from app.ntfs.filetree import FileNode, FileTree
 from app.ui.sector_map import STATUS_COLORS
 
 _REC_ROLE = Qt.UserRole          # record number on each item
 _POP_ROLE = Qt.UserRole + 1      # 1 once a dir's children are materialised
-
-CLEAR, LIGHT, DARK, AMBER, BAD = "clear", "light", "dark", "amber", "bad"
 
 
 def _make_box(color: QColor | None) -> QIcon:
@@ -165,7 +165,7 @@ class FileTreePanel(QTreeWidget):
         if self._tree is None or mf is None:
             return
         index = FinishedIndex.from_mapfile(mf)
-        rollup = self._rollup(index)
+        rollup = tree_status.rollup(self._tree, index)
         it = QTreeWidgetItemIterator(self)
         while it.value():
             item = it.value()
@@ -174,9 +174,9 @@ class FileTreePanel(QTreeWidget):
             if node is not None:
                 if node.is_dir:
                     got, bad, total, incomplete = rollup.get(rec_no, (0, 0, 0, 0))
-                    state = self._classify(got, bad, total, incomplete)
+                    state = tree_status.classify(got, bad, total, incomplete)
                 else:
-                    state = self._state_for(node, index)
+                    state = tree_status.node_state(node, index)
                 item.setIcon(0, self._icons[state])
             it += 1
 
@@ -200,84 +200,7 @@ class FileTreePanel(QTreeWidget):
                 continue
             if not node.fully_mapped:
                 n_unmapped += 1
-            if self._state_for(node, index) != DARK:
+            if tree_status.node_state(node, index) != DARK:
                 n_unfinished += 1
                 ranges += [(s, ln) for s, ln in node.ranges if ln > 0]
         return ranges, n_unfinished, n_unmapped
-
-    def _rollup(self, index: FinishedIndex) -> dict[int, tuple[int, int, int, int]]:
-        """Per-directory (finished, bad, total, incomplete) over its whole subtree.
-
-        A folder's box should reflect everything inside it, not just its own
-        index blocks — so we aggregate each node's own on-disk ranges up through
-        its ancestors (post-order over the model). ``bad`` lets a folder show red
-        when its content was tried but is unreadable; ``incomplete`` counts
-        files whose extent map came up short so the folder can show amber rather
-        than a misleading "complete".
-        """
-        nodes = self._tree.nodes
-        agg: dict[int, list[int]] = {}
-        for rec, node in nodes.items():
-            got = bad = total = 0
-            for start, length in node.ranges:
-                if length > 0:
-                    total += length
-                    got += index.finished_bytes(start, length)
-                    bad += index.bad_bytes(start, length)
-            incomplete = 0 if node.is_dir or node.fully_mapped else 1
-            agg[rec] = [got, bad, total, incomplete]
-
-        # Pre-order from the root (cycle-guarded), then fold children into
-        # parents in reverse for a correct post-order sum.
-        order: list[int] = []
-        seen: set[int] = set()
-        stack = [self._tree.root]
-        while stack:
-            rec = stack.pop()
-            if rec in seen:
-                continue
-            seen.add(rec)
-            order.append(rec)
-            node = nodes.get(rec)
-            if node:
-                stack.extend(c for c in node.children if c not in seen)
-        for rec in reversed(order):
-            node = nodes.get(rec)
-            if not node:
-                continue
-            for child in node.children:
-                if child in agg and child != rec:
-                    for k in range(4):
-                        agg[rec][k] += agg[child][k]
-        return {rec: tuple(v) for rec, v in agg.items()}
-
-    @staticmethod
-    def _classify(got: int, bad: int, total: int, incomplete: int = 0) -> str:
-        """Box state from finished/bad/total bytes of a node (or subtree).
-
-        ``incomplete`` (files whose extent map fell short) caps the result below
-        "complete": a node that would otherwise be dark green shows amber, since
-        it can never actually hold the whole file(s).
-        """
-        if total <= 0:               # nothing on disk here -> lives in the $MFT
-            return AMBER if incomplete else DARK
-        if got >= total:
-            return AMBER if incomplete else DARK
-        if got > 0:
-            return LIGHT             # some recovered (bad may also be present)
-        if bad > 0:
-            return BAD               # tried, unreadable — not just "not done"
-        return CLEAR
-
-    @classmethod
-    def _state_for(cls, node: FileNode, index: FinishedIndex) -> str:
-        incomplete = 0 if node.fully_mapped else 1
-        if not node.ranges:           # resident content: in the captured $MFT
-            return AMBER if incomplete else DARK
-        got = bad = total = 0
-        for start, length in node.ranges:
-            if length > 0:
-                total += length
-                got += index.finished_bytes(start, length)
-                bad += index.bad_bytes(start, length)
-        return cls._classify(got, bad, total, incomplete)
