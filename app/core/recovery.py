@@ -405,9 +405,19 @@ class TargetedRecovery(QObject):
     def _parse_vbrs(self, st: RecoveryState):
         from app.core import partition
         parts = partition.scan_device(st.outfile)
-        target = partition.first_recoverable(parts)
+        target = partition.best_recoverable(parts)
         for p in parts:
-            tag = f"  <- {p.fs_type.upper()}" if p.is_recoverable else ""
+            if p is target:
+                # fs_type is empty when we picked it from the partition table
+                # (its boot sector wasn't readable) — show the table's role.
+                what = p.fs_type.upper() or f"{p.type_name}, VBR unread"
+                tag = f"  <- TARGET ({what})"
+            elif p.is_recovery:
+                tag = "  (recovery — skipped)"
+            elif p.is_recoverable:
+                tag = f"  <- {p.fs_type.upper()}"
+            else:
+                tag = ""
             st.log(f"  #{p.index} {p.scheme} @0x{p.start:X} {p.type_name} "
                    f"{p.label}{tag}")
         if target is None:
@@ -418,6 +428,9 @@ class TargetedRecovery(QObject):
             st.volume_offset = target.start
             self._select_plan(self._plan_for(target.fs_type))
             st.log(f"Targeting {self._plan.name} volume at offset 0x{target.start:X}.")
+            if not target.fs_type:
+                st.log("  (identified from the partition table; its boot sector "
+                       "wasn't readable — defaulting to NTFS.)")
         return Next(self._plan.first_phase)
 
     # --- user-selected ranges (folder prioritization) ---------------------

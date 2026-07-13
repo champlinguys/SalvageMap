@@ -21,6 +21,7 @@ working for existing callers and tests."""
 from app.core.partition import (  # noqa: F401
     MBR_TYPE_NAMES,
     Partition,
+    best_recoverable,
     first_ntfs,
     first_recoverable,
     scan_device,

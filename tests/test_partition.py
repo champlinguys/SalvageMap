@@ -116,6 +116,110 @@ def test_gpt_single_ntfs_partition(tmp_path):
     assert p.label == "DATA"
 
 
+def _gpt_entry(type_guid: bytes, first_lba: int, last_lba: int,
+               name: str = "", attrs: int = 0) -> bytearray:
+    e = bytearray(128)
+    e[0:16] = type_guid
+    struct.pack_into("<Q", e, 32, first_lba)
+    struct.pack_into("<Q", e, 40, last_lba)
+    struct.pack_into("<Q", e, 48, attrs)
+    e[56:56 + len(name) * 2] = name.encode("utf-16-le")
+    return e
+
+
+def test_gpt_oem_layout_targets_data_not_recovery(tmp_path):
+    """OEM Windows layout: a WinRE recovery volume physically precedes C:.
+
+    The naive 'first NTFS' pick grabbed the recovery volume; best_recoverable
+    must skip it and target the large data partition instead.
+    """
+    from app.core.partition import _guid_bytes, best_recoverable
+
+    sector = 512
+    # WinRE recovery NTFS at LBA 34 (small), Windows data NTFS later (large).
+    rec_start = 34
+    rec_end = 100
+    data_start = 2048
+    data_end = data_start + 400  # bigger than the recovery volume
+
+    mbr = bytearray(512)
+    mbr[510:512] = b"\x55\xaa"
+
+    header = bytearray(512)
+    header[0:8] = b"EFI PART"
+    struct.pack_into("<Q", header, 72, 2)
+    struct.pack_into("<I", header, 80, 4)
+    struct.pack_into("<I", header, 84, 128)
+
+    recovery_guid = _guid_bytes("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC")
+    data_guid = _guid_bytes("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+    entries = bytearray(4 * 128)
+    entries[0:128] = _gpt_entry(recovery_guid, rec_start, rec_end, "Recovery",
+                                attrs=1 << 63)
+    entries[128:256] = _gpt_entry(data_guid, data_start, data_end, "Basic data")
+
+    image = bytearray((data_end + 1) * sector)
+    image[0:512] = mbr
+    image[512:1024] = header
+    image[1024:1024 + len(entries)] = entries
+    image[rec_start * sector:rec_start * sector + 512] = build_ntfs_vbr()
+    image[data_start * sector:data_start * sector + 512] = build_ntfs_vbr()
+
+    parts = partition.scan_device(write_image(tmp_path, bytes(image)))
+    assert len(parts) == 2
+    rec, data = parts
+    assert rec.is_recovery is True
+    assert rec.type_name == "Windows Recovery"
+    assert data.is_recovery is False
+    # Both are NTFS, but the picker must choose the real data volume.
+    target = best_recoverable(parts)
+    assert target is data
+    assert target.start == data_start * sector
+    # Back-compat alias delegates to the same heuristic.
+    assert partition.first_recoverable(parts) is data
+
+
+def test_gpt_targets_data_partition_with_unreadable_vbr(tmp_path):
+    """The Windows data VBR is damaged/unimaged (zeros), so it won't probe as
+    NTFS. The GPT type GUID still marks it 'Windows Basic data', so the picker
+    must target it over the (readable) recovery volume rather than fall back."""
+    from app.core.partition import _guid_bytes, best_recoverable
+
+    sector = 512
+    rec_start, rec_end = 34, 100
+    data_start, data_end = 2048, 2600  # larger; VBR left as zeros
+
+    mbr = bytearray(512)
+    mbr[510:512] = b"\x55\xaa"
+    header = bytearray(512)
+    header[0:8] = b"EFI PART"
+    struct.pack_into("<Q", header, 72, 2)
+    struct.pack_into("<I", header, 80, 4)
+    struct.pack_into("<I", header, 84, 128)
+
+    recovery_guid = _guid_bytes("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC")
+    data_guid = _guid_bytes("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+    entries = bytearray(4 * 128)
+    entries[0:128] = _gpt_entry(recovery_guid, rec_start, rec_end, "Recovery")
+    entries[128:256] = _gpt_entry(data_guid, data_start, data_end, "Basic data")
+
+    image = bytearray((data_end + 1) * sector)
+    image[0:512] = mbr
+    image[512:1024] = header
+    image[1024:1024 + len(entries)] = entries
+    image[rec_start * sector:rec_start * sector + 512] = build_ntfs_vbr()
+    # data partition VBR intentionally left as zeros (damaged/unimaged)
+
+    parts = partition.scan_device(write_image(tmp_path, bytes(image)))
+    rec, data = parts
+    assert rec.is_recoverable is True and rec.is_recovery is True
+    assert data.is_recoverable is False       # VBR unreadable -> no FS probe
+    assert data.is_data_type is True          # but the table says user-data
+    target = best_recoverable(parts)
+    assert target is data
+    assert target.fs_type == ""               # caller defaults this to NTFS
+
+
 def test_no_partition_table(tmp_path):
     parts = partition.scan_device(write_image(tmp_path, bytes(4096)))
     assert parts == []
