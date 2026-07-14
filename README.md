@@ -46,6 +46,14 @@ in the style of FTK / DMDE / Data Extractor:
   recovered**, amber = as complete as the current map allows but known-incomplete,
   red = tried but unreadable. Right-click a folder to **image it first**, or run a
   final completeness pass to retry everything not yet whole.
+- **Customer reports** — from the paused **Show Files** view, **Export to TXT**
+  writes a plain, easy-to-read tree marking each entry *Recovered* / *Not
+  recovered*, and **Export to HTML** produces a single self-contained,
+  dark-mode, mobile- and desktop-friendly report you can browse, search and
+  filter — with an optional logo so data-recovery professionals can brand it.
+  The HTML renders lazily, so even disks with hundreds of thousands of files
+  open instantly, and hidden/filesystem-internal clutter (`.DS_Store`,
+  Spotlight, HFS+ private data, …) is omitted by default.
 
 ## Install (Ubuntu)
 
