@@ -3,8 +3,9 @@
 # ddrescue and ntfs-3g from apt, so testers install with a double-click (or
 # `sudo apt install ./salvagemap_*.deb`) and never touch pip or a build step.
 #
-# Pure-Python, architecture-independent (arch: all). Targets Ubuntu 24.04+,
-# whose apt provides the python3-pyside6.* packages and Python >= 3.11.
+# Pure-Python, architecture-independent (arch: all). Targets a recent Ubuntu
+# whose apt provides the split python3-pyside6.* packages and Python >= 3.11
+# (verified on Ubuntu 26.04).
 #
 # Usage:  packaging/build-deb.sh [VERSION]
 # VERSION defaults to the version in pyproject.toml. Output: dist/salvagemap_<ver>_all.deb

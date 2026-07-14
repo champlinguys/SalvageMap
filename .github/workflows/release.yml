@@ -21,18 +21,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build & test dependencies
+      # Building the .deb needs nothing but dpkg. PySide6/ddrescue are only
+      # needed to run the test suite as a release guard — and the runner's apt
+      # doesn't carry the python3-pyside6.* packages, so PySide6 comes from pip
+      # (in a venv) while the FS tools the tests shell out to come from apt.
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            dpkg-dev gddrescue ntfs-3g \
-            python3-pyside6.qtwidgets python3-pyside6.qtgui \
-            python3-pyside6.qtcore python3-pytest
+            dpkg-dev gddrescue ntfs-3g e2fsprogs \
+            libegl1 libgl1 libxkbcommon0
+
+      - name: Set up Python test environment
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install PySide6 pytest
 
       - name: Run tests (guard the release)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python3 -m pytest -q
+        run: |
+          . .venv/bin/activate
+          python -m pytest -q
 
       - name: Determine version from tag
         id: ver
@@ -55,7 +67,7 @@ jobs:
           files: dist/*.deb
           generate_release_notes: true
           body: |
-            ### Install on Ubuntu 24.04+
+            ### Install on Ubuntu (with PySide6 in apt; verified on 26.04)
 
             Download `salvagemap_${{ steps.ver.outputs.version }}_all.deb` below, then:
 
