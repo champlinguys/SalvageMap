@@ -46,21 +46,40 @@ in the style of FTK / DMDE / Data Extractor:
   recovered**, amber = as complete as the current map allows but known-incomplete,
   red = tried but unreadable. Right-click a folder to **image it first**, or run a
   final completeness pass to retry everything not yet whole.
+- **Customer reports** — from the paused **Show Files** view, **Export to TXT**
+  writes a plain, easy-to-read tree marking each entry *Recovered* / *Not
+  recovered*, and **Export to HTML** produces a single self-contained,
+  dark-mode, mobile- and desktop-friendly report you can browse, search and
+  filter — with an optional logo so data-recovery professionals can brand it.
+  The HTML renders lazily, so even disks with hundreds of thousands of files
+  open instantly, and hidden/filesystem-internal clutter (`.DS_Store`,
+  Spotlight, HFS+ private data, …) is omitted by default.
 
 ## Install (Ubuntu)
 
-The easiest way to try SalvageMap is the prebuilt `.deb` on the
-[Releases page](https://github.com/champlinguys/SalvageMap/releases) — no
-building, no pip. On a recent Ubuntu that ships PySide6 in apt (the
-`python3-pyside6.*` packages; verified on **Ubuntu 26.04**):
+The easiest way to try SalvageMap is the prebuilt `.deb` — no building, no pip.
+It targets a recent Ubuntu that ships PySide6 in apt (the `python3-pyside6.*`
+packages; verified on **Ubuntu 26.04**).
+
+**1. Download** the latest `salvagemap_*.deb` from the
+[**Releases page**](https://github.com/champlinguys/SalvageMap/releases/latest)
+(under *Assets*). Or grab it from a terminal:
 
 ```sh
-sudo apt install ./salvagemap_*.deb
+wget https://github.com/champlinguys/SalvageMap/releases/download/v0.1.0/salvagemap_0.1.0_all.deb
 ```
 
-apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically. Then launch
-**SalvageMap** from your applications menu (it prompts for a password so it can
-read raw disks) or run `salvagemap` from a terminal.
+**2. Install** it — double-click the file to open it in Ubuntu's software
+installer, or run:
+
+```sh
+sudo apt install ./salvagemap_0.1.0_all.deb
+```
+
+apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically.
+
+**3. Launch** **SalvageMap** from your applications menu (it prompts for a
+password so it can read raw disks), or run `salvagemap` from a terminal.
 
 To build the `.deb` yourself: `packaging/build-deb.sh` (output in `dist/`).
 Pushing a `vX.Y.Z` tag builds and publishes it via GitHub Actions
