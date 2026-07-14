@@ -51,7 +51,8 @@ in the style of FTK / DMDE / Data Extractor:
 
 The easiest way to try SalvageMap is the prebuilt `.deb` on the
 [Releases page](https://github.com/champlinguys/SalvageMap/releases) — no
-building, no pip. On **Ubuntu 24.04+**:
+building, no pip. On a recent Ubuntu that ships PySide6 in apt (the
+`python3-pyside6.*` packages; verified on **Ubuntu 26.04**):
 
 ```sh
 sudo apt install ./salvagemap_*.deb
