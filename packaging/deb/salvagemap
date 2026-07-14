@@ -1,0 +1,7 @@
+#!/bin/sh
+# SalvageMap launcher (unprivileged). Runs the app from its installed location.
+# Raw block-device access needs root — use the desktop entry (which elevates via
+# pkexec) or run `salvagemap-pkexec` for that. This plain launcher is handy when
+# you are already root or only opening existing image/mapfiles.
+export PYTHONPATH="/usr/lib/salvagemap${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m app.main "$@"

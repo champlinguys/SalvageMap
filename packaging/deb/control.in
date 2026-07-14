@@ -1,0 +1,23 @@
+Package: salvagemap
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: Champlin Guys Data Recovery <champlinguys@gmail.com>
+Depends: python3 (>= 3.11),
+ python3-pyside6.qtwidgets,
+ python3-pyside6.qtgui,
+ python3-pyside6.qtcore,
+ gddrescue,
+ ntfs-3g
+Recommends: pkexec | policykit-1, x11-xserver-utils
+Homepage: https://github.com/champlinguys/SalvageMap
+Description: GUI wrapper over GNU ddrescue with a live sector map
+ SalvageMap is a Linux desktop front-end for GNU ddrescue. It renders the
+ ddrescue mapfile as a live sector map, drives a targeted recovery workflow
+ that images filesystem metadata first and then the most valuable file data,
+ and lets you browse the recovered file tree with per-file recovery status.
+ .
+ It invokes the system ddrescue binary and depends on Qt for Python (PySide6);
+ both are pulled in from Ubuntu's own packages. Reading raw block devices needs
+ root, so the desktop launcher elevates through pkexec.
