@@ -1,0 +1,68 @@
+name: Build & publish .deb
+
+# Push a version tag (e.g. v0.1.0) to build the Ubuntu installer and attach it
+# to a GitHub Release automatically:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag name (without the leading "v") becomes the package version.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:      # allow a manual run from the Actions tab
+
+permissions:
+  contents: write         # needed to create the Release and upload the .deb
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build & test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev gddrescue ntfs-3g \
+            python3-pyside6.qtwidgets python3-pyside6.qtgui \
+            python3-pyside6.qtcore python3-pytest
+
+      - name: Run tests (guard the release)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 -m pytest -q
+
+      - name: Determine version from tag
+        id: ver
+        run: |
+          ref="${GITHUB_REF_NAME}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb
+        run: packaging/build-deb.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Verify the package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb | grep -q 'usr/bin/salvagemap'
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
+          body: |
+            ### Install on Ubuntu 24.04+
+
+            Download `salvagemap_${{ steps.ver.outputs.version }}_all.deb` below, then:
+
+            ```sh
+            sudo apt install ./salvagemap_${{ steps.ver.outputs.version }}_all.deb
+            ```
+
+            apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically. Launch
+            **SalvageMap** from your applications menu (it prompts for a password
+            to access raw disks), or run `salvagemap` from a terminal.

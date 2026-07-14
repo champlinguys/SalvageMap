@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SalvageMap
+GenericName=Disk Recovery
+Comment=Recover failing drives with GNU ddrescue and a live sector map
+Exec=salvagemap-pkexec
+Icon=salvagemap
+Terminal=false
+Categories=System;Utility;Filesystem;
+Keywords=ddrescue;recovery;disk;image;rescue;data;ntfs;
+StartupNotify=true
+StartupWMClass=SalvageMap

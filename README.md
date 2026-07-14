@@ -47,7 +47,27 @@ in the style of FTK / DMDE / Data Extractor:
   red = tried but unreadable. Right-click a folder to **image it first**, or run a
   final completeness pass to retry everything not yet whole.
 
+## Install (Ubuntu)
+
+The easiest way to try SalvageMap is the prebuilt `.deb` on the
+[Releases page](https://github.com/champlinguys/SalvageMap/releases) — no
+building, no pip. On **Ubuntu 24.04+**:
+
+```sh
+sudo apt install ./salvagemap_*.deb
+```
+
+apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically. Then launch
+**SalvageMap** from your applications menu (it prompts for a password so it can
+read raw disks) or run `salvagemap` from a terminal.
+
+To build the `.deb` yourself: `packaging/build-deb.sh` (output in `dist/`).
+Pushing a `vX.Y.Z` tag builds and publishes it via GitHub Actions
+(`.github/workflows/release.yml`).
+
 ## Requirements
+
+To run from source instead:
 
 - Python 3.11+
 - PySide6 (Qt 6)
