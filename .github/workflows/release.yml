@@ -67,7 +67,7 @@ jobs:
           files: dist/*.deb
           generate_release_notes: true
           body: |
-            ### Install on Ubuntu (with PySide6 in apt; verified on 26.04)
+            ### Install on Ubuntu 24.04+
 
             Download `salvagemap_${{ steps.ver.outputs.version }}_all.deb` below, then:
 
@@ -75,6 +75,12 @@ jobs:
             sudo apt install ./salvagemap_${{ steps.ver.outputs.version }}_all.deb
             ```
 
-            apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically. Launch
-            **SalvageMap** from your applications menu (it prompts for a password
-            to access raw disks), or run `salvagemap` from a terminal.
+            apt pulls in PySide6, GNU ddrescue, ntfs-3g and the Qt xcb libraries
+            automatically. Launch **SalvageMap** from your applications menu (it
+            prompts for a password to access raw disks), or run `salvagemap` from
+            a terminal.
+
+            **Ubuntu 22.04 or older?** apt has no PySide6 there, so run from
+            source instead — see the
+            [Run from source](https://github.com/champlinguys/SalvageMap#run-from-source-ubuntu-2204-or-older-or-non-debian)
+            instructions in the README.
