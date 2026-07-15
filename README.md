@@ -58,25 +58,27 @@ in the style of FTK / DMDE / Data Extractor:
 ## Install (Ubuntu)
 
 The easiest way to try SalvageMap is the prebuilt `.deb` — no building, no pip.
-It targets a recent Ubuntu that ships PySide6 in apt (the `python3-pyside6.*`
-packages; verified on **Ubuntu 26.04**).
+It requires **Ubuntu 24.04 or newer** (that's where apt ships the
+`python3-pyside6.*` packages it depends on; verified on 24.04 and 26.04). On
+**Ubuntu 22.04 or older**, skip to [Run from source](#run-from-source-ubuntu-2204-or-older-or-non-debian).
 
 **1. Download** the latest `salvagemap_*.deb` from the
 [**Releases page**](https://github.com/champlinguys/SalvageMap/releases/latest)
 (under *Assets*). Or grab it from a terminal:
 
 ```sh
-wget https://github.com/champlinguys/SalvageMap/releases/download/v0.1.0/salvagemap_0.1.0_all.deb
+wget https://github.com/champlinguys/SalvageMap/releases/download/v0.1.1/salvagemap_0.1.1_all.deb
 ```
 
 **2. Install** it — double-click the file to open it in Ubuntu's software
 installer, or run:
 
 ```sh
-sudo apt install ./salvagemap_0.1.0_all.deb
+sudo apt install ./salvagemap_0.1.1_all.deb
 ```
 
-apt pulls in PySide6, GNU ddrescue and ntfs-3g automatically.
+apt pulls in PySide6, GNU ddrescue, ntfs-3g and the Qt xcb libraries
+automatically.
 
 **3. Launch** **SalvageMap** from your applications menu (it prompts for a
 password so it can read raw disks), or run `salvagemap` from a terminal.
@@ -85,11 +87,44 @@ To build the `.deb` yourself: `packaging/build-deb.sh` (output in `dist/`).
 Pushing a `vX.Y.Z` tag builds and publishes it via GitHub Actions
 (`.github/workflows/release.yml`).
 
+### Run from source (Ubuntu 22.04 or older, or non-Debian)
+
+Older Ubuntu has no PySide6 in apt, so install it from pip into a virtualenv:
+
+```sh
+# system tools (these exist on 22.04)
+sudo apt install gddrescue ntfs-3g libxcb-cursor0 git python3-venv python3-pip
+
+git clone https://github.com/champlinguys/SalvageMap.git
+cd SalvageMap
+python3 -m venv .venv
+. .venv/bin/activate
+pip install PySide6
+
+# let it read raw disks without running the GUI as root:
+sudo usermod -aG disk $USER      # then LOG OUT and back in for this to take effect
+
+.venv/bin/python3 -m app.main
+```
+
+`libxcb-cursor0` is required by Qt 6.5+ for the X11 plugin — without it the app
+aborts with *"Could not load the Qt platform plugin xcb"*. The `usermod` step
+only applies to a **new login session**, so log out and back in (or reboot)
+before running; check with `groups` that `disk` is listed.
+
+If you'd rather run it as root, forward your display so the GUI can reach it:
+
+```sh
+xhost +SI:localuser:root
+sudo -E .venv/bin/python3 -m app.main
+# when finished: xhost -SI:localuser:root
+```
+
 ## Requirements
 
 To run from source instead:
 
-- Python 3.11+
+- Python 3.10+
 - PySide6 (Qt 6)
 - `ddrescue` (1.20+; tested with 1.30) on `PATH`
 - For tests: `pytest`, plus the filesystem tools used by the integration checks
