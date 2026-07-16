@@ -21,6 +21,8 @@ from app.core.ddrescue_runner import (
     SafetyError,
     build_command,
     parse_status_line,
+    presize_image,
+    source_size,
     validate_targets,
 )
 
@@ -98,3 +100,65 @@ def test_non_sparse_destination_logic(monkeypatch):
     assert r.non_sparse_destination("/whatever/out.img") == "exfat"
     monkeypatch.setattr(r, "filesystem_type", lambda p: "ext4")
     assert r.non_sparse_destination("/whatever/out.img") is None
+
+
+def test_source_size_reads_regular_file(tmp_path):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 4096)
+    assert source_size(str(src)) == 4096
+
+
+def test_source_size_missing_returns_none(tmp_path):
+    assert source_size(str(tmp_path / "nope")) is None
+
+
+def test_presize_grows_new_image_to_source_size(tmp_path):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 8192)
+    out = tmp_path / "out.img"
+    assert presize_image(str(src), str(out)) == 8192
+    assert out.stat().st_size == 8192
+
+
+def test_presize_preserves_existing_partial_data(tmp_path):
+    """The rescued bytes must survive pre-sizing untouched."""
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 8192)
+    out = tmp_path / "out.img"
+    out.write_bytes(b"RESCUED")
+    presize_image(str(src), str(out))
+    assert out.stat().st_size == 8192
+    assert out.read_bytes()[:7] == b"RESCUED"
+
+
+def test_presize_never_shrinks_a_longer_image(tmp_path):
+    """A larger existing image must never be truncated down."""
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 512)
+    out = tmp_path / "out.img"
+    out.write_bytes(b"y" * 4096)
+    assert presize_image(str(src), str(out)) is None
+    assert out.stat().st_size == 4096
+
+
+def test_presize_skips_non_sparse_filesystem(tmp_path, monkeypatch):
+    """On exFAT/FAT a hole would allocate real gigabytes — so don't."""
+    monkeypatch.setattr(
+        "app.core.ddrescue_runner.non_sparse_destination", lambda _o: "exfat"
+    )
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 8192)
+    out = tmp_path / "out.img"
+    assert presize_image(str(src), str(out)) is None
+    assert not out.exists()
+
+
+def test_presize_creates_sparse_hole_not_real_bytes(tmp_path):
+    """Growing must cost no disk space."""
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * (32 * 1024 * 1024))
+    out = tmp_path / "out.img"
+    presize_image(str(src), str(out))
+    st = out.stat()
+    assert st.st_size == 32 * 1024 * 1024
+    assert st.st_blocks * 512 < st.st_size

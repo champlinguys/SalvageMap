@@ -135,6 +135,54 @@ def non_sparse_destination(outfile: str) -> str | None:
     return None
 
 
+def source_size(infile: str) -> int | None:
+    """Size in bytes of the source device or file, or None if unknowable."""
+    try:
+        fd = os.open(infile, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        return os.lseek(fd, 0, os.SEEK_END) or None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def presize_image(infile: str, outfile: str) -> int | None:
+    """Grow the image to the source's full size. Returns the new size, or None.
+
+    ddrescue writes sparsely, so an interrupted image ends at the highest offset
+    written rather than the size of the drive. That matters because a GPT header
+    points at the disk's final sectors: when the image is short, those references
+    fall outside the file and tools reject the partition table outright, showing
+    no partitions and no files even though the filesystem is perfectly intact.
+
+    Only ever grows, and only where holes are free — so it never allocates real
+    space and never touches a rescued byte.
+    """
+    if non_sparse_destination(outfile):
+        return None
+    size = source_size(infile)
+    if not size:
+        return None
+    try:
+        current = os.path.getsize(outfile)
+    except OSError:
+        current = 0
+    if current >= size:
+        return None
+    # O_CREAT without O_TRUNC: never discards an existing partial image.
+    fd = os.open(outfile, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        os.ftruncate(fd, size)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return size
+
+
 def validate_targets(infile: str, outfile: str) -> None:
     """Refuse configurations that could destroy data.
 
@@ -233,6 +281,7 @@ class DdrescueRunner(QObject):
         if self.is_running:
             raise RuntimeError("A rescue is already running.")
         validate_targets(infile, outfile)
+        presized = presize_image(infile, outfile)
         argv = build_command(infile, outfile, mapfile_path, settings)
 
         self._mapfile_path = mapfile_path
@@ -248,6 +297,8 @@ class DdrescueRunner(QObject):
         self._proc = proc
 
         self.started.emit(argv)
+        if presized:
+            self.logLine.emit(f"Pre-sized image to source size ({presized} bytes).")
         proc.start(argv[0], argv[1:])
         self._poll.start()
 
