@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -420,9 +420,23 @@ class MainWindow(QMainWindow):
                     "Nothing imaged yet — recover the filesystem metadata first.",
                 )
             return
+        # Parsing the $MFT runs synchronously on the GUI thread and, on a large
+        # volume, is minutes of pure-Python work over millions of records. Show a
+        # wait cursor and a message — and flush them to the screen before the
+        # parse starts — so the frozen window reads as "working", not "crashed".
+        self.statusBar().showMessage(
+            "Parsing filesystem metadata — this can take several minutes on a "
+            "large volume…"
+        )
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        QGuiApplication.processEvents()  # paint the cursor + message before blocking
         try:
-            plan, vol = self._locate_plan()
-            tree = plan.build_tree(self.output, vol) if plan else None
+            try:
+                plan, vol = self._locate_plan()
+                tree = plan.build_tree(self.output, vol) if plan else None
+            except (OSError, ValueError) as exc:
+                self.log_panel.append_line(f"[file tree] could not build: {exc}")
+                return
             if tree is None:
                 if announce:
                     QMessageBox.information(
@@ -434,19 +448,19 @@ class MainWindow(QMainWindow):
                     )
                 return
             self.volume_offset = vol  # remember the detected offset for later steps
-        except (OSError, ValueError) as exc:
-            self.log_panel.append_line(f"[file tree] could not build: {exc}")
-            return
-        self.file_tree.set_tree(tree)
-        self._btn_export_txt.setEnabled(tree is not None)
-        self._btn_export_html.setEnabled(tree is not None)
-        if self._last_mapfile is not None:
-            self.file_tree.refresh_status(self._last_mapfile)
-        self._update_volume_status()
-        self.log_panel.append_line(
-            f"[file tree] {len(tree.nodes)} entries ({plan.name}) "
-            f"at offset 0x{vol:X}."
-        )
+            self.file_tree.set_tree(tree)
+            self._btn_export_txt.setEnabled(tree is not None)
+            self._btn_export_html.setEnabled(tree is not None)
+            if self._last_mapfile is not None:
+                self.file_tree.refresh_status(self._last_mapfile)
+            self._update_volume_status()
+            self.log_panel.append_line(
+                f"[file tree] {len(tree.nodes)} entries ({plan.name}) "
+                f"at offset 0x{vol:X}."
+            )
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
 
     def _on_workflow_finished(self, ok: bool, message: str) -> None:
         self.status_panel.checklist.mark_finished(ok)
