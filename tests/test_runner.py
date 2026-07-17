@@ -162,3 +162,53 @@ def test_presize_creates_sparse_hole_not_real_bytes(tmp_path):
     st = out.stat()
     assert st.st_size == 32 * 1024 * 1024
     assert st.st_blocks * 512 < st.st_size
+
+
+# --- stop() never raises out of the slot ---------------------------------
+class _StaleProc:
+    """A QProcess whose state still says Running after the pid was reaped.
+
+    That is the real race: QProcess only refreshes its cached state when Qt
+    delivers the child-exit notification, so a Stop click landing before that
+    finds is_running True and a pid that no longer exists.
+    """
+
+    def __init__(self):
+        self.state_value = "Running"
+
+    def state(self):
+        return self.state_value
+
+    def processId(self):
+        return 424242
+
+
+def _runner_with_stale_proc(monkeypatch, error):
+    from app.core.ddrescue_runner import DdrescueRunner
+
+    runner = DdrescueRunner()
+    runner._proc = _StaleProc()
+    monkeypatch.setattr(
+        "app.core.ddrescue_runner.QProcess.NotRunning", "NotRunning", raising=False
+    )
+
+    def boom(_pid, _sig):
+        raise error
+
+    monkeypatch.setattr("app.core.ddrescue_runner.os.kill", boom)
+    return runner
+
+
+def test_stop_survives_already_exited_process(monkeypatch):
+    """ddrescue exiting on its own (--timeout) must not crash the Stop click."""
+    runner = _runner_with_stale_proc(monkeypatch, ProcessLookupError())
+    runner.stop()  # must not raise: PySide6 aborts on an exception in a slot
+
+
+def test_stop_reports_permission_error_instead_of_raising(monkeypatch):
+    """A signal we're not allowed to send is reported, not fatal."""
+    runner = _runner_with_stale_proc(monkeypatch, PermissionError("not permitted"))
+    lines = []
+    runner.logLine.connect(lines.append)
+    runner.stop()
+    assert lines and "Could not signal ddrescue" in lines[0]
