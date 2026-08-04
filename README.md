@@ -34,6 +34,17 @@ in the style of FTK / DMDE / Data Extractor:
   Export file-data Domain File** writes the best domain file so you can re-run
   `ddrescue -m` manually with your own settings.
 
+- **BitLocker** — unlock an encrypted volume *in the image* with its 48-digit
+  recovery key (**Tools ▸ Unlock BitLocker volume…**; you're also offered it
+  automatically when a locked volume turns up). The image keeps the ciphertext
+  ddrescue read — nothing is ever decrypted onto disk and the key is never
+  written down — and every later read of that volume is decrypted on the way
+  past, so the file tree, the per-file status and *image this folder first* all
+  work exactly as on an unencrypted drive. The volume is found by its `-FVE-FS-`
+  signature even when sector 0 never came back, so a partial rescue with no
+  readable partition table still opens. Supports AES-XTS-128/256 and
+  AES-CBC-128/256; the Vista-era Elephant-diffuser variants are detected and
+  refused rather than silently mis-decrypted.
 - **Fragmentation-aware** — a large, heavily-fragmented file (e.g. video) scatters
   its data across the disk, and the map of *where* often lives in a secondary
   structure: the HFS+ **Extents Overflow file**, an NTFS **`$ATTRIBUTE_LIST`** /
@@ -77,7 +88,8 @@ installer, or run:
 sudo apt install ./salvagemap_0.1.2_all.deb
 ```
 
-apt pulls in PySide6, GNU ddrescue, ntfs-3g and the Qt xcb libraries
+apt pulls in PySide6, python3-cryptography, GNU ddrescue, ntfs-3g and
+the Qt xcb libraries
 automatically.
 
 **3. Launch** **SalvageMap** from your applications menu (it prompts for a
@@ -99,7 +111,7 @@ git clone https://github.com/champlinguys/SalvageMap.git
 cd SalvageMap
 python3 -m venv .venv
 . .venv/bin/activate
-pip install PySide6
+pip install PySide6 cryptography
 
 # let it read raw disks without running the GUI as root:
 sudo usermod -aG disk $USER      # then LOG OUT and back in for this to take effect
@@ -126,6 +138,7 @@ To run from source instead:
 
 - Python 3.10+
 - PySide6 (Qt 6)
+- `cryptography` (for BitLocker unlocking)
 - `ddrescue` (1.20+; tested with 1.30) on `PATH`
 - For tests: `pytest`, plus the filesystem tools used by the integration checks
   (`ntfs-3g` / `mkntfs` for NTFS, `e2fsprogs` / `mke2fs` for ext4, and
@@ -135,7 +148,8 @@ On Debian/Ubuntu:
 
 ```sh
 sudo apt-get install gddrescue python3-pyside6.qtwidgets python3-pyside6.qtgui \
-                     python3-pyside6.qtcore python3-pytest ntfs-3g
+                     python3-pyside6.qtcore python3-cryptography python3-pytest \
+                     ntfs-3g
 ```
 
 ## Run
@@ -166,7 +180,10 @@ app/
   ui/        main_window, sector_map, status_panel, log_panel, file_tree_panel
   core/      recovery (filesystem-agnostic phase engine + plan interface),
              mapfile (parse/aggregate), domain (domain-mapfile builder),
-             volume (filesystem detection), ddrescue_runner (QProcess + guards)
+             volume (filesystem detection), decrypt (unlocked-image registry),
+             ddrescue_runner (QProcess + guards)
+  bitlocker/ fve (metadata), keys (unlock + sector decryption), source
+             (decrypt-on-read view), detect (find volumes without a table)
   ntfs/      runlist, boot_sector, mft (incl. $ATTRIBUTE_LIST), filetree, plan
   ext/       superblock, group_desc, inode, extents, dirent, catalog, plan
   hfsplus/   volume_header, btree, extents (overflow), catalog, plan
@@ -198,3 +215,6 @@ an external library. They are credited here with gratitude:
   it is not distributed with this project.
 - **[Qt for Python (PySide6)](https://wiki.qt.io/Qt_for_Python)** — the GUI
   toolkit, licensed under the LGPLv3.
+- **[python-cryptography](https://cryptography.io/)** — the AES primitives
+  behind BitLocker unlocking, licensed under Apache-2.0 / BSD-3-Clause. Install
+  it yourself (`apt-get install python3-cryptography`); it is not bundled.

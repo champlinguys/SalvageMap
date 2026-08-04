@@ -39,7 +39,10 @@ from PySide6.QtWidgets import (
 )
 
 from app import __version__
-from app.core import config, mapfile
+from app.bitlocker import detect as bitlocker_detect
+from app.bitlocker import keys as bitlocker_keys
+from app.bitlocker.source import BitLockerSource
+from app.core import config, decrypt, mapfile
 from app.core.ddrescue_runner import (
     DdrescueRunner,
     RescueSettings,
@@ -55,6 +58,7 @@ from app.core.recovery import (
     get_source_size,
 )
 from app.core.volume import detect_filesystem
+from app.ui.bitlocker_dialog import BitLockerUnlockDialog
 from app.ui.ddrescue_view import DdrescueView
 from app.ui.device_dialog import DeviceDialog
 from app.ui.file_tree_panel import FileTreePanel
@@ -92,6 +96,8 @@ class MainWindow(QMainWindow):
         if isinstance(saved_sector, int) and saved_sector > 0:
             self.settings.sector_size = saved_sector
         self._sparse_warning_ack = False         # warned about non-sparse dest once
+        self._unlocked: BitLockerSource | None = None  # unlocked encrypted volume
+        self._unlock_declined = False            # don't re-offer the unlock prompt
 
         # Core engine.
         self.runner = DdrescueRunner(self)
@@ -233,6 +239,10 @@ class MainWindow(QMainWindow):
         tools_menu = mb.addMenu("&Tools")
         self._add_action(tools_menu, "Rebuild file &tree from image", lambda: self._rebuild_file_tree(announce=True))
         self._add_action(tools_menu, "&Partition scan (MBR/GPT)…", self._partition_scan)
+        # Wrapped in a lambda: QAction.triggered would otherwise pass its
+        # `checked` bool as `announce`, silencing the dialogs.
+        self._add_action(tools_menu, "&Unlock BitLocker volume…",
+                         lambda: self._unlock_bitlocker(announce=True))
         self._add_action(tools_menu, "&MFT Browser…", self._not_implemented)
 
         help_menu = mb.addMenu("&Help")
@@ -411,8 +421,13 @@ class MainWindow(QMainWindow):
                 return plan, target.start
         return None, vol
 
-    def _rebuild_file_tree(self, announce: bool = False) -> None:
-        """Parse the image's filesystem metadata and (re)populate the file tree."""
+    def _rebuild_file_tree(self, announce: bool = False,
+                           offer_unlock: bool = True) -> None:
+        """Parse the image's filesystem metadata and (re)populate the file tree.
+
+        ``offer_unlock`` is cleared when we're already inside an unlock, so a
+        volume that still won't parse doesn't loop back to the key prompt.
+        """
         if not (self.output and os.path.exists(self.output)):
             if announce:
                 QMessageBox.information(
@@ -420,6 +435,35 @@ class MainWindow(QMainWindow):
                     "Nothing imaged yet — recover the filesystem metadata first.",
                 )
             return
+        # An encrypted volume also reads as "no filesystem here", so on failure
+        # we look for a locked volume before blaming the rescue. The generic
+        # message is held back until we know that isn't the explanation.
+        if self._build_tree_from_image(announce=announce and not offer_unlock):
+            return
+        if not offer_unlock:
+            return
+        if self._offer_unlock():
+            return
+        if self._unlock_declined:
+            if announce:
+                QMessageBox.information(
+                    self, "Volume is locked",
+                    "This volume is BitLocker-encrypted, so its files can't be "
+                    "read until it's unlocked.\n\nTools ▸ Unlock BitLocker "
+                    "volume… — you'll need the 48-digit recovery key.",
+                )
+            return
+        if announce:
+            QMessageBox.information(
+                self, "No filesystem metadata in image",
+                "Couldn't find recovered filesystem metadata in this image."
+                "\n\nIf this image is from an older run, image the "
+                "filesystem metadata first (Targeted Recovery ▸ Step 1) "
+                "using the same image + logfile, then it will populate.",
+            )
+
+    def _build_tree_from_image(self, announce: bool = False) -> bool:
+        """Parse and show the file tree. False if there was nothing to show."""
         # Parsing the $MFT runs synchronously on the GUI thread and, on a large
         # volume, is minutes of pure-Python work over millions of records. Show a
         # wait cursor and a message — and flush them to the screen before the
@@ -436,7 +480,7 @@ class MainWindow(QMainWindow):
                 tree = plan.build_tree(self.output, vol) if plan else None
             except (OSError, ValueError) as exc:
                 self.log_panel.append_line(f"[file tree] could not build: {exc}")
-                return
+                return False
             if tree is None:
                 if announce:
                     QMessageBox.information(
@@ -446,7 +490,7 @@ class MainWindow(QMainWindow):
                         "filesystem metadata first (Targeted Recovery ▸ Step 1) "
                         "using the same image + logfile, then it will populate.",
                     )
-                return
+                return False
             self.volume_offset = vol  # remember the detected offset for later steps
             self.file_tree.set_tree(tree)
             self._btn_export_txt.setEnabled(tree is not None)
@@ -458,6 +502,7 @@ class MainWindow(QMainWindow):
                 f"[file tree] {len(tree.nodes)} entries ({plan.name}) "
                 f"at offset 0x{vol:X}."
             )
+            return True
         finally:
             QGuiApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
@@ -502,6 +547,7 @@ class MainWindow(QMainWindow):
             return
         output, logfile = out_dlg.result_paths()
 
+        self._clear_unlock(output)  # a new image: any previous unlock is stale
         self.source = source
         self.output = output
         self.logfile = logfile
@@ -558,6 +604,118 @@ class MainWindow(QMainWindow):
                 f"({self.volume_offset} bytes){fs}."
             )
 
+    # --- BitLocker --------------------------------------------------------
+    def _find_locked_volumes(self):
+        """BitLocker volumes in the image (a short scan; wait cursor on)."""
+        if not (self.output and os.path.exists(self.output)):
+            return []
+        extra = () if self.volume_offset is None else (self.volume_offset,)
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return bitlocker_detect.find_volumes(self.output, extra_offsets=extra)
+        except OSError as exc:
+            self.log_panel.append_line(f"[bitlocker] scan failed: {exc}")
+            return []
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+    def _unlock_bitlocker(self, announce: bool = True, volumes=None) -> bool:
+        """Unlock a BitLocker volume in the image with its recovery key.
+
+        The unlock lives in memory for this session only: the image keeps its
+        ciphertext, and every later read of that volume is decrypted on the way
+        past. Returns True if a volume is now unlocked. ``volumes`` reuses an
+        earlier scan's result rather than sweeping the image again.
+        """
+        if not (self.output and os.path.exists(self.output)):
+            if announce:
+                QMessageBox.information(
+                    self, "No image",
+                    "Open an image first: File ▸ Import previous logfile + image…",
+                )
+            return False
+        volumes = volumes or self._find_locked_volumes()
+        if not volumes:
+            if announce:
+                QMessageBox.information(
+                    self, "No BitLocker volume found",
+                    "No BitLocker volume was found in this image.\n\nIf the "
+                    "volume starts beyond the first 512 MiB, set its offset "
+                    "first (Tools ▸ Partition scan), then try again.",
+                )
+            return False
+
+        dlg = BitLockerUnlockDialog(volumes, self)
+        if not dlg.exec():
+            self._unlock_declined = True
+            return False
+        volume, key = dlg.selected_volume(), dlg.recovery_key()
+
+        # Key derivation is ~a second of deliberate hashing; show it's working.
+        self.statusBar().showMessage("Deriving the BitLocker key…")
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        QGuiApplication.processEvents()
+        try:
+            unlocked = bitlocker_keys.unlock_with_recovery_password(
+                volume.metadata, key)
+            source = BitLockerSource.from_metadata(
+                volume.offset, volume.size, volume.metadata, unlocked)
+        except bitlocker_keys.UnlockError as exc:
+            QMessageBox.critical(self, "Could not unlock", str(exc))
+            return False
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+
+        decrypt.register(self.output, source)
+        self._unlocked = source
+        self._unlock_declined = False
+        self.volume_offset = volume.offset
+        self.volume_fs_type = ""   # re-detected from the now-readable volume
+        self._update_volume_status()
+        self.log_panel.append_line(
+            f"[bitlocker] unlocked volume at 0x{volume.offset:X} "
+            f"({source.method_name}); reads of this volume are now decrypted. "
+            f"Description: {volume.description or '—'}"
+        )
+        self._rebuild_file_tree(announce=announce, offer_unlock=False)
+        self._set_tree_files_view()
+        return True
+
+    def _offer_unlock(self) -> bool:
+        """If the image holds a locked volume, offer to unlock it. True if done."""
+        if self._unlocked is not None or self._unlock_declined:
+            return False
+        volumes = self._find_locked_volumes()
+        if not volumes:
+            return False
+        first = volumes[0]
+        resp = QMessageBox.question(
+            self, "BitLocker volume found",
+            f"The volume at offset 0x{first.offset:X} is BitLocker-encrypted "
+            f"({first.method_name}), so its files can't be read yet.\n\n"
+            f"Description: {first.description or '—'}\n"
+            f"Identifier: {', '.join(first.metadata.recovery_identifiers) or '—'}\n\n"
+            "Unlock it now with the recovery key?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if resp != QMessageBox.Yes:
+            self._unlock_declined = True
+            return False
+        return self._unlock_bitlocker(volumes=volumes)
+
+    def _clear_unlock(self, new_image: str | None = None) -> None:
+        """Drop any unlocked volume — a new session is opening an image.
+
+        Clears the incoming image too: the registry is process-wide, so an
+        earlier session's key for the same path must not leak into this one.
+        """
+        for path in (self.output, new_image):
+            if path:
+                decrypt.unregister(path)
+        self._unlocked = None
+        self._unlock_declined = False
+
     def _update_volume_status(self) -> None:
         if self.volume_offset is None:
             text = "auto-detect"
@@ -565,6 +723,8 @@ class MainWindow(QMainWindow):
             text = "whole device (offset 0)"
         else:
             text = f"0x{self.volume_offset:X} ({self.volume_offset:,} B)"
+        if self._unlocked is not None:
+            text += f" — BitLocker unlocked ({self._unlocked.method_name})"
         self.status_panel.set_field("volume", text)
 
     def _import_logfile(self) -> None:
@@ -580,6 +740,7 @@ class MainWindow(QMainWindow):
             return
         image, logfile = dlg.result_paths()
 
+        self._clear_unlock(image)  # a new image: any previous unlock is stale
         self.source = None         # imported session has no attached device yet
         self.output = image
         self.logfile = logfile

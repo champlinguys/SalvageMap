@@ -49,6 +49,27 @@ def plan_for_fs(fs_type: str) -> FilesystemPlan:
     return NtfsPlan()
 
 
+def locked_volume_message(image: str, volume_offset: int) -> str | None:
+    """A "this volume is encrypted" message, or None if it's readable.
+
+    Reads through :func:`read_image`, so an already-unlocked volume shows its
+    plaintext filesystem here and this returns None — the check is "still
+    locked?", not "was ever encrypted?".
+    """
+    from app.bitlocker.fve import looks_like_bitlocker
+    try:
+        head = read_image(image, volume_offset, 512)
+    except OSError:
+        return None
+    if not looks_like_bitlocker(head):
+        return None
+    return (
+        f"The volume at offset 0x{volume_offset:X} is BitLocker-encrypted, so "
+        "its filesystem can't be read yet.\n\nUnlock it first with its recovery "
+        "key: Tools ▸ Unlock BitLocker volume…, then run this step again."
+    )
+
+
 def detect_filesystem(image: str, volume_offset: int) -> FilesystemPlan | None:
     """Identify the filesystem at ``volume_offset`` in the image and pick a plan.
 
@@ -60,6 +81,6 @@ def detect_filesystem(image: str, volume_offset: int) -> FilesystemPlan | None:
     except OSError:
         return None
     tag = partition.identify_filesystem(head)
-    if not tag:
-        return None
+    if not tag or tag in partition.LOCKED:
+        return None   # encrypted: no plan applies until it's unlocked
     return plan_for_fs(tag)

@@ -46,7 +46,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from app.core import domain, mapfile
+from app.core import decrypt, domain, mapfile
 from app.core.ddrescue_runner import DdrescueRunner, RescueSettings
 
 TABLE_SCAN_BYTES = 64 * 1024   # MBR + GPT header + entries
@@ -180,11 +180,24 @@ def get_source_size(path: str) -> int:
         os.close(fd)
 
 
-def read_image(outfile: str, offset: int, length: int) -> bytes:
-    """Read from the output image (all parsing reads the image, never the device)."""
+def read_raw_image(outfile: str, offset: int, length: int) -> bytes:
+    """Read the image's bytes exactly as they are on disk (no decryption)."""
     with open(outfile, "rb") as fh:
         fh.seek(offset)
         return fh.read(length)
+
+
+def read_image(outfile: str, offset: int, length: int) -> bytes:
+    """Read from the output image (all parsing reads the image, never the device).
+
+    If the image holds an unlocked encrypted volume (see :mod:`app.core.decrypt`),
+    reads inside that volume are decrypted on the way out, so every filesystem
+    parser sees plaintext without knowing encryption is involved.
+    """
+    source = decrypt.source_for(outfile)
+    if source is None:
+        return read_raw_image(outfile, offset, length)
+    return source.read(lambda o, n: read_raw_image(outfile, o, n), offset, length)
 
 
 @dataclass
@@ -260,7 +273,15 @@ class TargetedRecovery(QObject):
             self._enter(Phase.GET_TABLE)
         else:
             self._st.volume_offset = ctx.volume_offset
-            self._select_plan(self._plan_for(ctx.fs_type))
+            locked = self._locked_message(ctx.volume_offset)
+            if locked:
+                self._fail(locked)
+                return
+            # What the imaged volume says beats the caller's tag: an unlocked
+            # encrypted volume reads as its real filesystem, and the tag the UI
+            # carried may predate the unlock.
+            self._select_plan(
+                self._detect_plan(ctx.volume_offset) or self._plan_for(ctx.fs_type))
             self._enter(self._plan.first_phase)
 
     def run_from_existing_mft(self, ctx: RecoveryContext) -> None:
@@ -293,6 +314,10 @@ class TargetedRecovery(QObject):
             raise RuntimeError("A targeted recovery is already running.")
         self._begin_session(ctx)
         self._st.volume_offset = ctx.volume_offset or 0
+        locked = self._locked_message(self._st.volume_offset)
+        if locked:
+            self._fail(locked)
+            return False
         self._select_plan(
             self._detect_plan(self._st.volume_offset) or self._plan_for(ctx.fs_type))
         err = self._plan.prepare_existing(self._st)
@@ -309,6 +334,11 @@ class TargetedRecovery(QObject):
     def _detect_plan(self, offset: int) -> FilesystemPlan | None:
         from app.core import volume
         return volume.detect_filesystem(self._ctx.outfile, offset)
+
+    def _locked_message(self, offset: int) -> str | None:
+        """Guidance if the volume at ``offset`` is still encrypted, else None."""
+        from app.core import volume
+        return volume.locked_volume_message(self._ctx.outfile, offset)
 
     def _select_plan(self, plan: FilesystemPlan) -> None:
         self._plan = plan
@@ -393,6 +423,9 @@ class TargetedRecovery(QObject):
         if not parts:
             st.log("No partition table found — treating disk as a bare volume.")
             st.volume_offset = 0
+            locked = self._locked_message(0)
+            if locked:
+                return Terminal(False, locked)
             self._select_plan(self._detect_plan(0) or self._plan_for(""))
             return Next(self._plan.first_phase)
         self._candidate_starts = [p.start for p in parts]
@@ -423,14 +456,21 @@ class TargetedRecovery(QObject):
         if target is None:
             st.log("No recoverable filesystem detected — using offset 0.")
             st.volume_offset = 0
-            self._select_plan(self._detect_plan(0) or self._plan_for(""))
         else:
             st.volume_offset = target.start
-            self._select_plan(self._plan_for(target.fs_type))
-            st.log(f"Targeting {self._plan.name} volume at offset 0x{target.start:X}.")
-            if not target.fs_type:
-                st.log("  (identified from the partition table; its boot sector "
-                       "wasn't readable — defaulting to NTFS.)")
+        locked = self._locked_message(st.volume_offset)
+        if locked:
+            return Terminal(False, locked)
+        # Prefer what the imaged volume itself says: an unlocked encrypted volume
+        # reads as its real filesystem here, while the partition scan (which
+        # reads the raw image) still sees the encryption.
+        detected = self._detect_plan(st.volume_offset)
+        self._select_plan(
+            detected or self._plan_for(target.fs_type if target else ""))
+        st.log(f"Targeting {self._plan.name} volume at offset 0x{st.volume_offset:X}.")
+        if target is not None and not target.fs_type and detected is None:
+            st.log("  (identified from the partition table; its boot sector "
+                   "wasn't readable — defaulting to NTFS.)")
         return Next(self._plan.first_phase)
 
     # --- user-selected ranges (folder prioritization) ---------------------
@@ -447,6 +487,11 @@ class TargetedRecovery(QObject):
     def _run_domain(self, ranges: list[tuple[int, int]]) -> None:
         st = self._st
         self._current_ranges = ranges
+        # Ranges come from the filesystem, so on an unlocked encrypted volume
+        # they are plaintext offsets; ddrescue must be pointed at the physical
+        # sectors that hold their ciphertext (identical except the relocated
+        # boot region). A no-op when nothing is unlocked.
+        ranges = decrypt.physical_ranges(st.outfile, ranges)
         dmap = domain.build_domain_mapfile(ranges, st.size, st.settings.sector_size)
         self.domainSize.emit(domain.covered_bytes(dmap))
         dmap_path = os.path.join(st.workdir, f"domain_{self._phase.name.lower()}.dmap")
