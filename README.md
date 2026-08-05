@@ -78,14 +78,14 @@ It requires **Ubuntu 24.04 or newer** (that's where apt ships the
 (under *Assets*). Or grab it from a terminal:
 
 ```sh
-wget https://github.com/champlinguys/SalvageMap/releases/download/v0.1.2/salvagemap_0.1.2_all.deb
+wget https://github.com/champlinguys/SalvageMap/releases/download/v0.2.0/salvagemap_0.2.0_all.deb
 ```
 
 **2. Install** it — double-click the file to open it in Ubuntu's software
 installer, or run:
 
 ```sh
-sudo apt install ./salvagemap_0.1.2_all.deb
+sudo apt install ./salvagemap_0.2.0_all.deb
 ```
 
 apt pulls in PySide6, python3-cryptography, GNU ddrescue, ntfs-3g and

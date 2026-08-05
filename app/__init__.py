@@ -16,4 +16,6 @@
 
 """SalvageMap — GUI wrapper over GNU ddrescue."""
 
-__version__ = "0.1.0"
+# Keep in step with [project] version in pyproject.toml; the .deb
+# build checks the two agree.
+__version__ = "0.2.0"

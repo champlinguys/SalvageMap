@@ -24,6 +24,14 @@ if [ -z "$version" ]; then
     echo "error: could not determine version" >&2
     exit 1
 fi
+# app/__init__.py is what the About box shows, and it had silently drifted a
+# release behind the package. Refuse to build a .deb whose two versions disagree.
+app_version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$root/app/__init__.py" | head -n1)"
+if [ -n "$app_version" ] && [ "$app_version" != "$version" ]; then
+    echo "error: app/__init__.py says $app_version but the package is $version" >&2
+    echo "       update app/__init__.py so the About box matches the release." >&2
+    exit 1
+fi
 echo "Building salvagemap $version"
 
 # --- staging tree ----------------------------------------------------------
