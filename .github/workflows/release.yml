@@ -37,7 +37,7 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install PySide6 pytest
+          python -m pip install PySide6 cryptography pytest
 
       - name: Run tests (guard the release)
         env:
@@ -75,8 +75,8 @@ jobs:
             sudo apt install ./salvagemap_${{ steps.ver.outputs.version }}_all.deb
             ```
 
-            apt pulls in PySide6, GNU ddrescue, ntfs-3g and the Qt xcb libraries
-            automatically. Launch **SalvageMap** from your applications menu (it
+            apt pulls in PySide6, python3-cryptography, GNU ddrescue, ntfs-3g
+            and the Qt xcb libraries automatically. Launch **SalvageMap** from your applications menu (it
             prompts for a password to access raw disks), or run `salvagemap` from
             a terminal.
 
