@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.ui import theme
 from app.ui.main_window import MainWindow
@@ -33,8 +34,32 @@ ICON_PATH = os.path.join(
 )
 
 
+def _install_excepthook() -> None:
+    """Report unhandled exceptions instead of letting them kill the process.
+
+    PySide6 calls qFatal() — an immediate abort, no traceback the user ever sees
+    under pkexec — when an exception escapes a slot and sys.excepthook is still
+    the default. A rescue in progress must survive a bug in an unrelated slot:
+    ddrescue keeps running and the mapfile keeps saving, so the user can stop
+    cleanly and resume. Installing any hook of our own suppresses the abort.
+    """
+    def hook(exc_type, exc, tb):
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+        text = "".join(traceback.format_exception_only(exc_type, exc)).strip()
+        box = QMessageBox(
+            QMessageBox.Critical, "SalvageMap — internal error",
+            f"{text}\n\nThe rescue is unaffected; progress is saved to the "
+            "logfile. Please report this with the details below.",
+        )
+        box.setDetailedText("".join(traceback.format_exception(exc_type, exc, tb)))
+        box.exec()
+
+    sys.excepthook = hook
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    _install_excepthook()
     app.setApplicationName("SalvageMap")
     app.setDesktopFileName("SalvageMap")   # link to the .desktop for taskbar grouping
     app.setStyle("Fusion")

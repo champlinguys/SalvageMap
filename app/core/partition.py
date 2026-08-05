@@ -105,9 +105,14 @@ _PROBE_BYTES = 0x440  # enough to cover an NTFS VBR, the ext magic and the HFS+ 
 
 # Human labels for the detected filesystems.
 FS_LABELS = {"ntfs": "NTFS/exFAT", "ext": "Linux (ext)",
-             "hfsplus": "Mac OS (HFS+)", "": "Unknown"}
+             "hfsplus": "Mac OS (HFS+)", "bitlocker": "BitLocker (locked)",
+             "": "Unknown"}
 # Filesystems the targeted workflow can recover (drives picker highlighting).
+# BitLocker is deliberately absent: the volume must be unlocked first, after
+# which it reads as whatever filesystem it holds (normally NTFS).
 RECOVERABLE = {"ntfs", "ext", "hfsplus"}
+# Encrypted volumes: recoverable in principle, but only once unlocked.
+LOCKED = {"bitlocker"}
 
 
 @dataclass
@@ -135,6 +140,11 @@ class Partition:
     def is_recoverable(self) -> bool:
         return self.fs_type in RECOVERABLE
 
+    @property
+    def is_locked(self) -> bool:
+        """Encrypted volume: identified, but unreadable until it's unlocked."""
+        return self.fs_type in LOCKED
+
 
 def _pread(fd: int, offset: int, length: int) -> bytes:
     try:
@@ -160,6 +170,11 @@ def _looks_ext(head: bytes) -> bool:
     return int.from_bytes(head[EXT_MAGIC_OFFSET:EXT_MAGIC_OFFSET + 2], "little") == EXT_MAGIC
 
 
+def _looks_bitlocker(head: bytes) -> bool:
+    from app.bitlocker.fve import looks_like_bitlocker
+    return looks_like_bitlocker(head)
+
+
 def _looks_hfsplus(head: bytes) -> bool:
     if len(head) < HFSPLUS_HEADER_OFFSET + 2:
         return False
@@ -167,9 +182,12 @@ def _looks_hfsplus(head: bytes) -> bool:
     return sig in HFSPLUS_SIGNATURES
 
 
-# Ordered (probe-on-bytes) pairs; first match wins. NTFS first since its VBR is
-# at offset 0 and is the more specific signature.
-_FS_PROBES = (("ntfs", _looks_ntfs), ("ext", _looks_ext), ("hfsplus", _looks_hfsplus))
+# Ordered (probe-on-bytes) pairs; first match wins. BitLocker first: its boot
+# record sits where the NTFS VBR would and carries the volume's own "-FVE-FS-"
+# OEM id, so the most specific signature gets first refusal. NTFS next, since
+# its VBR is also at offset 0.
+_FS_PROBES = (("bitlocker", _looks_bitlocker), ("ntfs", _looks_ntfs),
+              ("ext", _looks_ext), ("hfsplus", _looks_hfsplus))
 
 
 def identify_filesystem(head: bytes) -> str:
@@ -343,7 +361,11 @@ def best_recoverable(parts: list[Partition]) -> Partition | None:
     def largest(pool: list[Partition]) -> Partition | None:
         return max(pool, key=lambda p: p.size) if pool else None
 
-    detected = [p for p in parts if p.is_recoverable and not p.is_recovery]
+    # A locked (encrypted) volume counts as positively identified: it is almost
+    # always the user's data volume, and targeting it is what surfaces the
+    # "unlock this first" prompt instead of silently recovering something else.
+    detected = [p for p in parts
+                if (p.is_recoverable or p.is_locked) and not p.is_recovery]
     typed = [p for p in parts if p.is_data_type and not p.is_recovery]
     fallback = [p for p in parts if p.is_recoverable]
     return largest(detected) or largest(typed) or largest(fallback)

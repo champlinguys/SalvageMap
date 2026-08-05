@@ -303,11 +303,25 @@ class DdrescueRunner(QObject):
         self._poll.start()
 
     def stop(self) -> None:
-        """Send SIGINT so ddrescue saves its mapfile and exits cleanly."""
-        if self._proc and self.is_running:
-            pid = int(self._proc.processId())
-            if pid > 0:
-                os.kill(pid, signal.SIGINT)
+        """Send SIGINT so ddrescue saves its mapfile and exits cleanly.
+
+        ``is_running`` reads QProcess's cached state, which only refreshes once
+        Qt delivers the child-exit notification on the event loop. ddrescue can
+        already be gone by then — it exits on its own when --timeout expires or
+        the pass completes — so the pid may be reaped before we signal it. Treat
+        that as an already-stopped rescue: the finished handler is still coming.
+        """
+        if not (self._proc and self.is_running):
+            return
+        pid = int(self._proc.processId())
+        if pid <= 0:
+            return
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass  # already exited; _on_finished will fire
+        except OSError as exc:
+            self.logLine.emit(f"Could not signal ddrescue (pid {pid}): {exc}")
 
     # --- internals --------------------------------------------------------
     def _on_output(self) -> None:
