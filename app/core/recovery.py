@@ -58,6 +58,8 @@ class Phase(Enum):
     # Shared partition detection.
     GET_TABLE = auto()
     GET_VBRS = auto()
+    # Encrypted-container metadata, imaged so the volume can be unlocked at all.
+    GET_CSMETA = auto()
     # NTFS plan.
     GET_BOOT = auto()
     GET_MFT0 = auto()
@@ -83,8 +85,14 @@ class Phase(Enum):
 # --- phase outcomes -------------------------------------------------------
 @dataclass(frozen=True)
 class Image:
-    """Build outcome: image these ``(start, length)`` ranges this phase."""
+    """Build outcome: image these ``(start, length)`` ranges this phase.
+
+    ``raw`` marks ranges that are already physical disk offsets and must not be
+    translated through an unlocked volume's mapping — the encrypted container's
+    own metadata, which is read before (and in order to) unlock it.
+    """
     ranges: list[tuple[int, int]]
+    raw: bool = False
 
 
 @dataclass(frozen=True)
@@ -227,6 +235,13 @@ class TargetedRecovery(QObject):
         super().__init__(parent)
         self._runner = runner
         self._phase = Phase.IDLE
+        # CoreStorage container metadata is fetched at most once per session.
+        self._csmeta_done = False
+        # Set by the UI to unlock a volume *during* a run: given the volume
+        # offset, it should unlock and register a decrypting source, returning
+        # True if it did. Without it the run stops and asks the tech to unlock
+        # by hand, which is the same workflow one step less automatic.
+        self.unlock_requested: Callable[[int], bool] | None = None
         self._ctx: RecoveryContext | None = None
         self._st: RecoveryState | None = None
         self._plan: FilesystemPlan | None = None
@@ -242,6 +257,9 @@ class TargetedRecovery(QObject):
             Phase.GET_VBRS: PhaseHandler(
                 Phase.GET_VBRS, "Detecting partitions: imaging volume boot records",
                 self._build_vbrs, self._parse_vbrs),
+            Phase.GET_CSMETA: PhaseHandler(
+                Phase.GET_CSMETA, "Imaging CoreStorage metadata (needed to unlock)",
+                self._build_csmeta, self._parse_csmeta),
             Phase.GET_SELECTED: PhaseHandler(
                 Phase.GET_SELECTED, "Imaging selected files",
                 self._build_selected, self._parse_selected),
@@ -273,9 +291,12 @@ class TargetedRecovery(QObject):
             self._enter(Phase.GET_TABLE)
         else:
             self._st.volume_offset = ctx.volume_offset
-            locked = self._locked_message(ctx.volume_offset)
-            if locked:
-                self._fail(locked)
+            locked = self._locked_outcome(ctx.volume_offset)
+            if isinstance(locked, Next):
+                self._enter(locked.phase)
+                return
+            if locked is not None:
+                self._fail(locked.message)
                 return
             # What the imaged volume says beats the caller's tag: an unlocked
             # encrypted volume reads as its real filesystem, and the tag the UI
@@ -340,6 +361,26 @@ class TargetedRecovery(QObject):
         from app.core import volume
         return volume.locked_volume_message(self._ctx.outfile, offset)
 
+    def _locked_outcome(self, offset: int):
+        """What to do about a still-locked volume at ``offset``; None if readable.
+
+        A locked BitLocker volume is a dead end for this run — its metadata sits
+        inside the volume, so it is already imaged and the tech simply needs the
+        recovery key. A locked CoreStorage volume is not: the container metadata
+        that libfvde needs has almost certainly *not* been imaged yet, so the
+        run diverts to :data:`Phase.GET_CSMETA` to fetch it (once per session)
+        rather than telling the tech to unlock something that cannot be unlocked.
+        """
+        message = self._locked_message(offset)
+        if message is None:
+            return None
+        from app.corestorage import detect
+        if self._csmeta_done or not detect.is_corestorage_at(
+                self._ctx.outfile, offset):
+            return Terminal(False, message)
+        self._csmeta_done = True
+        return Next(Phase.GET_CSMETA)
+
     def _select_plan(self, plan: FilesystemPlan) -> None:
         self._plan = plan
         self.planSelected.emit(plan.steps())
@@ -354,6 +395,9 @@ class TargetedRecovery(QObject):
         self._ctx = ctx
         self._plan = None
         self._candidate_starts = []
+        # A fresh run may be against a different image, and re-imaging the
+        # container metadata is cheap next to getting stuck unable to unlock.
+        self._csmeta_done = False
         self._st = RecoveryState(
             infile=ctx.infile, outfile=ctx.outfile, logfile=ctx.logfile,
             workdir=ctx.workdir, size=get_source_size(ctx.infile),
@@ -376,7 +420,7 @@ class TargetedRecovery(QObject):
             self.phaseStep.emit(phase)
             outcome = handler.build(self._st)
             if isinstance(outcome, Image):
-                self._run_domain(outcome.ranges)
+                self._run_domain(outcome.ranges, raw=outcome.raw)
                 return
         except Exception as exc:  # noqa: BLE001 — defensive boundary
             self._fail(f"Internal error during {phase.name}: {exc}")
@@ -423,14 +467,70 @@ class TargetedRecovery(QObject):
         if not parts:
             st.log("No partition table found — treating disk as a bare volume.")
             st.volume_offset = 0
-            locked = self._locked_message(0)
-            if locked:
-                return Terminal(False, locked)
+            locked = self._locked_outcome(0)
+            if locked is not None:
+                return locked
             self._select_plan(self._detect_plan(0) or self._plan_for(""))
             return Next(self._plan.first_phase)
         self._candidate_starts = [p.start for p in parts]
         st.log(f"Partition table: {len(parts)} partition(s) found.")
         return Next(Phase.GET_VBRS)
+
+    # --- CoreStorage container metadata -----------------------------------
+    def _build_csmeta(self, st: RecoveryState):
+        """Image the CoreStorage metadata, so the volume can be unlocked at all.
+
+        Without this the targeted workflow dead-ends: partition detection images
+        64 KiB per partition, but libfvde needs the container's metadata — and
+        two of its copies live at the *end* of the disk (12.7 TiB in on the
+        reference drive), nowhere near anything imaged so far. The unlock would
+        fail in a way that reads exactly like a wrong password.
+        """
+        from app.corestorage import cs, detect
+        header = detect.parse_at(st.outfile, st.volume_offset)
+        if header is None:
+            return Terminal(False, "The CoreStorage header could not be re-read "
+                                   "from the image.")
+        ranges = [(st.volume_offset + off, length)
+                  for off, length in cs.unlock_ranges(header)]
+        total = sum(length for _, length in ranges)
+        st.log(f"CoreStorage: imaging {total / (1 << 20):,.0f} MiB of container "
+               f"metadata in {len(ranges)} region(s) so the volume can be "
+               "unlocked. Some of it is at the far end of the disk.")
+        return Image(ranges, raw=True)
+
+    def _parse_csmeta(self, st: RecoveryState):
+        """Unlock the container, then carry straight on into the real plan.
+
+        The container metadata is in the image now, so this is the first moment
+        an unlock can succeed — and the run has no reason to stop for it. The
+        password prompt is the UI's (via :attr:`unlock_requested`); everything
+        after it, from the HFS+ volume header to the file data, is the ordinary
+        targeted workflow running against plaintext.
+        """
+        from app.core import volume
+
+        def unlocked() -> bool:
+            return volume.locked_volume_message(
+                st.outfile, st.volume_offset) is None
+
+        if not unlocked() and self.unlock_requested is not None:
+            st.log("CoreStorage metadata imaged — unlocking to continue.")
+            try:
+                self.unlock_requested(st.volume_offset)
+            except Exception as exc:  # noqa: BLE001 — the UI must not wedge a run
+                st.log(f"Unlock failed: {exc}")
+
+        if unlocked():
+            plan = self._detect_plan(st.volume_offset) or self._plan_for("")
+            self._select_plan(plan)
+            st.log(f"Unlocked — continuing with the {plan.name} plan.")
+            return Next(plan.first_phase)
+
+        return Terminal(True,
+                        "CoreStorage metadata imaged. Unlock the volume — "
+                        "Tools ▸ Unlock CoreStorage volume… — then run this step "
+                        "again to recover the HFS+ directory tree.")
 
     def _build_vbrs(self, st: RecoveryState):
         return Image([(s, VBR_SCAN_BYTES) for s in self._candidate_starts])
@@ -458,9 +558,9 @@ class TargetedRecovery(QObject):
             st.volume_offset = 0
         else:
             st.volume_offset = target.start
-        locked = self._locked_message(st.volume_offset)
-        if locked:
-            return Terminal(False, locked)
+        locked = self._locked_outcome(st.volume_offset)
+        if locked is not None:
+            return locked
         # Prefer what the imaged volume itself says: an unlocked encrypted volume
         # reads as its real filesystem here, while the partition scan (which
         # reads the raw image) still sees the encryption.
@@ -484,14 +584,16 @@ class TargetedRecovery(QObject):
         return Terminal(True, self._selected_summary)
 
     # --- domain build + ddrescue ------------------------------------------
-    def _run_domain(self, ranges: list[tuple[int, int]]) -> None:
+    def _run_domain(self, ranges: list[tuple[int, int]], raw: bool = False) -> None:
         st = self._st
         self._current_ranges = ranges
         # Ranges come from the filesystem, so on an unlocked encrypted volume
         # they are plaintext offsets; ddrescue must be pointed at the physical
         # sectors that hold their ciphertext (identical except the relocated
-        # boot region). A no-op when nothing is unlocked.
-        ranges = decrypt.physical_ranges(st.outfile, ranges)
+        # boot region). A no-op when nothing is unlocked. ``raw`` ranges are
+        # already physical (the container's own metadata) and skip the mapping.
+        if not raw:
+            ranges = decrypt.physical_ranges(st.outfile, ranges)
         dmap = domain.build_domain_mapfile(ranges, st.size, st.settings.sector_size)
         self.domainSize.emit(domain.covered_bytes(dmap))
         dmap_path = os.path.join(st.workdir, f"domain_{self._phase.name.lower()}.dmap")

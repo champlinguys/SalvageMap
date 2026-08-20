@@ -12,7 +12,7 @@ Depends: python3 (>= 3.10),
  libxcb-cursor0,
  gddrescue,
  ntfs-3g
-Recommends: pkexec | policykit-1, x11-xserver-utils
+Recommends: pkexec | policykit-1, x11-xserver-utils, python3-libfvde
 Homepage: https://github.com/champlinguys/SalvageMap
 Description: GUI wrapper over GNU ddrescue with a live sector map
  SalvageMap is a Linux desktop front-end for GNU ddrescue. It renders the
@@ -23,3 +23,7 @@ Description: GUI wrapper over GNU ddrescue with a live sector map
  It invokes the system ddrescue binary and depends on Qt for Python (PySide6);
  both are pulled in from Ubuntu's own packages. Reading raw block devices needs
  root, so the desktop launcher elevates through pkexec.
+ .
+ BitLocker volumes are unlocked natively. Unlocking a Mac CoreStorage
+ (FileVault 2) volume additionally needs python3-libfvde; without it every
+ other feature works and the unlock dialog says what to install.

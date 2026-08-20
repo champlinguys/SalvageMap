@@ -106,13 +106,14 @@ _PROBE_BYTES = 0x440  # enough to cover an NTFS VBR, the ext magic and the HFS+ 
 # Human labels for the detected filesystems.
 FS_LABELS = {"ntfs": "NTFS/exFAT", "ext": "Linux (ext)",
              "hfsplus": "Mac OS (HFS+)", "bitlocker": "BitLocker (locked)",
-             "": "Unknown"}
+             "corestorage": "FileVault 2 (locked)", "": "Unknown"}
 # Filesystems the targeted workflow can recover (drives picker highlighting).
-# BitLocker is deliberately absent: the volume must be unlocked first, after
-# which it reads as whatever filesystem it holds (normally NTFS).
+# The encrypted ones are deliberately absent: the volume must be unlocked first,
+# after which it reads as whatever filesystem it holds (NTFS behind BitLocker,
+# HFS+ behind CoreStorage).
 RECOVERABLE = {"ntfs", "ext", "hfsplus"}
 # Encrypted volumes: recoverable in principle, but only once unlocked.
-LOCKED = {"bitlocker"}
+LOCKED = {"bitlocker", "corestorage"}
 
 
 @dataclass
@@ -175,6 +176,11 @@ def _looks_bitlocker(head: bytes) -> bool:
     return looks_like_bitlocker(head)
 
 
+def _looks_corestorage(head: bytes) -> bool:
+    from app.corestorage.cs import looks_like_corestorage
+    return looks_like_corestorage(head)
+
+
 def _looks_hfsplus(head: bytes) -> bool:
     if len(head) < HFSPLUS_HEADER_OFFSET + 2:
         return False
@@ -182,12 +188,12 @@ def _looks_hfsplus(head: bytes) -> bool:
     return sig in HFSPLUS_SIGNATURES
 
 
-# Ordered (probe-on-bytes) pairs; first match wins. BitLocker first: its boot
-# record sits where the NTFS VBR would and carries the volume's own "-FVE-FS-"
-# OEM id, so the most specific signature gets first refusal. NTFS next, since
-# its VBR is also at offset 0.
-_FS_PROBES = (("bitlocker", _looks_bitlocker), ("ntfs", _looks_ntfs),
-              ("ext", _looks_ext), ("hfsplus", _looks_hfsplus))
+# Ordered (probe-on-bytes) pairs; first match wins. The encrypted formats go
+# first: their headers sit where the NTFS VBR would, and each carries its own
+# distinctive signature ("-FVE-FS-", "CS"), so the most specific gets first
+# refusal. NTFS next, since its VBR is also at offset 0.
+_FS_PROBES = (("bitlocker", _looks_bitlocker), ("corestorage", _looks_corestorage),
+              ("ntfs", _looks_ntfs), ("ext", _looks_ext), ("hfsplus", _looks_hfsplus))
 
 
 def identify_filesystem(head: bytes) -> str:

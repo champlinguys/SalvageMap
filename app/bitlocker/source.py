@@ -80,6 +80,10 @@ class BitLockerSource:
                    header_block_size=md.header_block_size,
                    description=md.description)
 
+    # Names the encryption scheme for the UI; its CoreStorage counterpart
+    # answers "FileVault 2", so status text can stay scheme-agnostic.
+    scheme_name = "BitLocker"
+
     @property
     def method_name(self) -> str:
         return self.keys.method_name

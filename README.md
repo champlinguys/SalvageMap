@@ -45,6 +45,38 @@ in the style of FTK / DMDE / Data Extractor:
   readable partition table still opens. Supports AES-XTS-128/256 and
   AES-CBC-128/256; the Vista-era Elephant-diffuser variants are detected and
   refused rather than silently mis-decrypted.
+
+- **FileVault 2 (Mac)** — unlock a CoreStorage volume *in the image* with the
+  disk's password (**Tools ▸ Unlock CoreStorage volume…**, also offered
+  automatically). Same guarantee as BitLocker: the image keeps its ciphertext,
+  the password is never written down, and the HFS+ volume inside reads as
+  plaintext so the file tree and targeted imaging work unchanged. The volume is
+  found by its `CS` signature even with no readable partition table. The key
+  derivation is delegated to [libfvde](https://github.com/libyal/libfvde)
+  (`python3-libfvde`); without it everything else still works and the dialog
+  says what to install.
+
+  Unlocking needs the container's own metadata imaged first, and that is not
+  where you would expect: two of the copies live at the *far end* of the disk
+  (12.7 TiB in on the reference drive), nowhere near the 64 KiB per partition
+  that partition detection images. So the workflow inserts a step —
+  **Imaging CoreStorage metadata** — that images the ~144 MiB libfvde needs,
+  then stops and asks you to unlock. Without it the unlock fails in a way that
+  reads exactly like a wrong password.
+
+  libfvde cannot decrypt past **1 TiB** of a logical volume (a 32-bit index
+  limit in the library). That is not a problem for recovery — ddrescue images
+  ciphertext, and the HFS+ catalog and extents overflow live near the start of
+  the volume — but it does mean the mapping below is measured only up to that
+  ceiling and proved beyond it.
+
+  Where the logical volume physically lives is **measured, not assumed**:
+  CoreStorage allocates it out of segments of the partition and libfvde does not
+  expose that map, so SalvageMap watches which sectors libfvde actually reads
+  and bisects to pin the segment boundaries. A fixed shift would work on a
+  freshly-encrypted disk and silently image the wrong sectors on a resized one.
+  If the mapping cannot be established the whole partition is imaged instead —
+  imaging too much is slow, imaging the wrong place loses the recovery.
 - **Fragmentation-aware** — a large, heavily-fragmented file (e.g. video) scatters
   its data across the disk, and the map of *where* often lives in a secondary
   structure: the HFS+ **Extents Overflow file**, an NTFS **`$ATTRIBUTE_LIST`** /
@@ -139,6 +171,7 @@ To run from source instead:
 - Python 3.10+
 - PySide6 (Qt 6)
 - `cryptography` (for BitLocker unlocking)
+- `python3-libfvde` (optional; only for Mac CoreStorage / FileVault 2 unlocking)
 - `ddrescue` (1.20+; tested with 1.30) on `PATH`
 - For tests: `pytest`, plus the filesystem tools used by the integration checks
   (`ntfs-3g` / `mkntfs` for NTFS, `e2fsprogs` / `mke2fs` for ext4, and
@@ -184,6 +217,9 @@ app/
              ddrescue_runner (QProcess + guards)
   bitlocker/ fve (metadata), keys (unlock + sector decryption), source
              (decrypt-on-read view), detect (find volumes without a table)
+  corestorage/ cs (volume header), detect (find volumes without a table),
+             keys (libfvde-backed unlock), segments (measured logical→physical
+             map), source (decrypt-on-read view)
   ntfs/      runlist, boot_sector, mft (incl. $ATTRIBUTE_LIST), filetree, plan
   ext/       superblock, group_desc, inode, extents, dirent, catalog, plan
   hfsplus/   volume_header, btree, extents (overflow), catalog, plan
@@ -218,3 +254,8 @@ an external library. They are credited here with gratitude:
 - **[python-cryptography](https://cryptography.io/)** — the AES primitives
   behind BitLocker unlocking, licensed under Apache-2.0 / BSD-3-Clause. Install
   it yourself (`apt-get install python3-cryptography`); it is not bundled.
+- **[libfvde](https://github.com/libyal/libfvde)** by Joachim Metz — the
+  CoreStorage / FileVault 2 key derivation and decryption, licensed under the
+  LGPLv3. Install it yourself (`apt-get install python3-libfvde`); it is not
+  bundled, and SalvageMap runs without it (only Mac FileVault unlocking is
+  unavailable).

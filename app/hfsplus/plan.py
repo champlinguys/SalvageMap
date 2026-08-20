@@ -153,6 +153,18 @@ class HfsPlusPlan(FilesystemPlan):
 
     # --- file data --------------------------------------------------------
     def _build_filedata(self, st: RecoveryState):
+        # Distinguish "the catalog says there are no files" from "the catalog
+        # isn't in the image". Both end up as an empty scan, but only the first
+        # is a finished recovery — reporting the second as "no file data found"
+        # sends the tech looking at the wrong thing entirely.
+        bt = BTree(st.outfile, catalog.catalog_ranges(st.outfile, st.fs.vh))
+        if not bt.ok:
+            return Terminal(False,
+                            "The catalog B-tree isn't readable in the image, so "
+                            "there is nothing to derive file data from.\n\nRun "
+                            "Step 1 first (or re-run it) to image the catalog. "
+                            "On an encrypted volume, check it is unlocked — a "
+                            "locked volume reads as unrecoverable noise here.")
         scan = catalog.scan_filedata(st.outfile, st.fs.vh)
         st.fs.filedata_ranges = scan.ranges
         total = sum(length for _, length in scan.ranges)
@@ -172,7 +184,10 @@ class HfsPlusPlan(FilesystemPlan):
                 st.log(f"    …and {len(scan.incomplete) - _INCOMPLETE_LOG_LIMIT} "
                        "more.")
         if not scan.ranges:
-            return Terminal(True, "No allocated file data found to image.")
+            return Terminal(True,
+                            f"No allocated file data found to image. The catalog "
+                            f"holds {scan.n_files + scan.n_skipped:,} file(s), "
+                            f"none with imageable data-fork extents.")
         return Image(scan.ranges)
 
     def _parse_filedata(self, st: RecoveryState):

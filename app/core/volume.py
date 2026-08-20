@@ -57,17 +57,26 @@ def locked_volume_message(image: str, volume_offset: int) -> str | None:
     locked?", not "was ever encrypted?".
     """
     from app.bitlocker.fve import looks_like_bitlocker
+    from app.corestorage.cs import looks_like_corestorage
     try:
         head = read_image(image, volume_offset, 512)
     except OSError:
         return None
-    if not looks_like_bitlocker(head):
-        return None
-    return (
-        f"The volume at offset 0x{volume_offset:X} is BitLocker-encrypted, so "
-        "its filesystem can't be read yet.\n\nUnlock it first with its recovery "
-        "key: Tools ▸ Unlock BitLocker volume…, then run this step again."
-    )
+    if looks_like_bitlocker(head):
+        return (
+            f"The volume at offset 0x{volume_offset:X} is BitLocker-encrypted, so "
+            "its filesystem can't be read yet.\n\nUnlock it first with its "
+            "recovery key: Tools ▸ Unlock BitLocker volume…, then run this step "
+            "again."
+        )
+    if looks_like_corestorage(head):
+        return (
+            f"The volume at offset 0x{volume_offset:X} is a CoreStorage volume "
+            "encrypted with FileVault 2, so its filesystem can't be read yet."
+            "\n\nUnlock it first with the Mac's password: Tools ▸ Unlock "
+            "CoreStorage volume…, then run this step again."
+        )
+    return None
 
 
 def detect_filesystem(image: str, volume_offset: int) -> FilesystemPlan | None:

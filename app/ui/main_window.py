@@ -43,6 +43,10 @@ from app.bitlocker import detect as bitlocker_detect
 from app.bitlocker import keys as bitlocker_keys
 from app.bitlocker.source import BitLockerSource
 from app.core import config, decrypt, mapfile
+from app.corestorage import detect as corestorage_detect
+from app.corestorage import keys as corestorage_keys
+from app.corestorage import segments as corestorage_segments
+from app.corestorage.source import CoreStorageSource
 from app.core.ddrescue_runner import (
     DdrescueRunner,
     RescueSettings,
@@ -59,6 +63,7 @@ from app.core.recovery import (
 )
 from app.core.volume import detect_filesystem
 from app.ui.bitlocker_dialog import BitLockerUnlockDialog
+from app.ui.corestorage_dialog import CoreStorageUnlockDialog
 from app.ui.busy import run_blocking
 from app.ui.ddrescue_view import DdrescueView
 from app.ui.device_dialog import DeviceDialog
@@ -97,12 +102,17 @@ class MainWindow(QMainWindow):
         if isinstance(saved_sector, int) and saved_sector > 0:
             self.settings.sector_size = saved_sector
         self._sparse_warning_ack = False         # warned about non-sparse dest once
-        self._unlocked: BitLockerSource | None = None  # unlocked encrypted volume
+        # Unlocked encrypted volume, whichever scheme it uses.
+        self._unlocked: BitLockerSource | CoreStorageSource | None = None
         self._unlock_declined = False            # don't re-offer the unlock prompt
 
         # Core engine.
         self.runner = DdrescueRunner(self)
         self.targeted = TargetedRecovery(self.runner, self)
+        # Let a run unlock a CoreStorage volume the moment its metadata is
+        # imaged, so the workflow carries on into the HFS+ phases by itself
+        # instead of stopping to tell the tech to unlock and start again.
+        self.targeted.unlock_requested = self._unlock_during_run
 
         self.sector_map = SectorMapWidget()
         self.status_panel = StatusPanel()
@@ -244,6 +254,8 @@ class MainWindow(QMainWindow):
         # `checked` bool as `announce`, silencing the dialogs.
         self._add_action(tools_menu, "&Unlock BitLocker volume…",
                          lambda: self._unlock_bitlocker(announce=True))
+        self._add_action(tools_menu, "Unlock &CoreStorage volume…",
+                         lambda: self._unlock_corestorage(announce=True))
         self._add_action(tools_menu, "&MFT Browser…", self._not_implemented)
 
         help_menu = mb.addMenu("&Help")
@@ -458,9 +470,11 @@ class MainWindow(QMainWindow):
             if announce:
                 QMessageBox.information(
                     self, "Volume is locked",
-                    "This volume is BitLocker-encrypted, so its files can't be "
-                    "read until it's unlocked.\n\nTools ▸ Unlock BitLocker "
-                    "volume… — you'll need the 48-digit recovery key.",
+                    "This volume is encrypted, so its files can't be read "
+                    "until it's unlocked.\n\nTools ▸ Unlock BitLocker volume… "
+                    "(you'll need the 48-digit recovery key), or Tools ▸ Unlock "
+                    "CoreStorage volume… for a Mac FileVault 2 disk (you'll "
+                    "need its password).",
                 )
             return
         if announce:
@@ -692,13 +706,133 @@ class MainWindow(QMainWindow):
         self._set_tree_files_view()
         return True
 
+    # --- CoreStorage / FileVault 2 ----------------------------------------
+    def _find_corestorage_volumes(self):
+        """CoreStorage volumes in the image (a short scan; wait cursor on)."""
+        if not (self.output and os.path.exists(self.output)):
+            return []
+        extra = () if self.volume_offset is None else (self.volume_offset,)
+        try:
+            return run_blocking(
+                self, "Looking for encrypted volumes in the image…",
+                lambda: corestorage_detect.find_volumes(
+                    self.output, extra_offsets=extra),
+                title="Scanning image",
+            )
+        except OSError as exc:
+            self.log_panel.append_line(f"[corestorage] scan failed: {exc}")
+            return []
+
+    def _unlock_during_run(self, volume_offset: int) -> bool:
+        """Unlock the CoreStorage volume at ``volume_offset`` mid-workflow.
+
+        Called by the recovery engine once the container metadata is imaged.
+        The file tree is deliberately *not* rebuilt here: the catalog has not
+        been imaged yet — that is what the rest of the run is about — and
+        rebuilding now would only report it missing.
+        """
+        return self._unlock_corestorage(
+            announce=False, volumes=self._find_corestorage_volumes(),
+            rebuild=False)
+
+    def _unlock_corestorage(self, announce: bool = True, volumes=None,
+                            rebuild: bool = True) -> bool:
+        """Unlock a CoreStorage (FileVault 2) volume in the image with its password.
+
+        As with BitLocker the unlock lives in memory for this session only. The
+        extra step here is measuring where the logical volume physically sits
+        (see :mod:`app.corestorage.segments`) — without that, targeted imaging
+        would aim at the wrong sectors, so it is done before the source is
+        registered rather than lazily.
+        """
+        if not (self.output and os.path.exists(self.output)):
+            if announce:
+                QMessageBox.information(
+                    self, "No image",
+                    "Open an image first: File ▸ Import previous logfile + image…",
+                )
+            return False
+        volumes = volumes or self._find_corestorage_volumes()
+        if not volumes:
+            if announce:
+                QMessageBox.information(
+                    self, "No CoreStorage volume found",
+                    "No CoreStorage volume was found in this image.\n\nIf the "
+                    "volume starts beyond the first 512 MiB, set its offset "
+                    "first (Tools ▸ Partition scan), then try again.",
+                )
+            return False
+
+        dlg = CoreStorageUnlockDialog(volumes, self)
+        if not dlg.exec():
+            self._unlock_declined = True
+            return False
+        volume = dlg.selected_volume()
+        password, plist = dlg.password(), dlg.encrypted_root_plist()
+
+        try:
+            unlocked = run_blocking(
+                self, "Deriving the volume key from the password…",
+                lambda: corestorage_keys.unlock_with_password(
+                    self.output, volume.offset, volume.size, password,
+                    encrypted_root_plist=plist),
+                title="Unlocking",
+            )
+            mapping = run_blocking(
+                self, "Measuring where the volume's data physically lives…",
+                lambda: corestorage_segments.measure(
+                    unlocked, header=volume.header),
+                title="Mapping volume",
+            )
+            source = CoreStorageSource(unlocked, mapping, volume.header)
+        except corestorage_keys.UnlockError as exc:
+            QMessageBox.critical(self, "Could not unlock", str(exc))
+            return False
+
+        decrypt.register(self.output, source)
+        self._unlocked = source
+        self._unlock_declined = False
+        self.volume_offset = volume.offset
+        self.volume_fs_type = ""   # re-detected from the now-readable volume
+        self._update_volume_status()
+        self.log_panel.append_line(
+            f"[corestorage] unlocked volume at 0x{volume.offset:X} "
+            f"({source.method_name}); reads of this volume are now decrypted. "
+            f"Volume: {source.name or '—'}"
+        )
+        self.log_panel.append_line(
+            f"[corestorage] physical mapping: {mapping.summary}")
+        if not rebuild:
+            return True
+        if mapping.readable_limit < unlocked.size:
+            self.log_panel.append_line(
+                f"[corestorage] note: libfvde can only decrypt the first "
+                f"{mapping.readable_limit / (1 << 40):.2f} TiB of this "
+                f"{unlocked.size / (1 << 40):.2f} TiB volume (a 32-bit limit in "
+                "the library). Imaging is unaffected — ddrescue copies "
+                "ciphertext — and the HFS+ catalog sits well below the ceiling.")
+        if not mapping.trusted:
+            QMessageBox.warning(
+                self, "Volume mapped conservatively",
+                "The volume unlocked, but where its data physically lives could "
+                f"not be established:\n\n{mapping.evidence}\n\nTargeted "
+                "imaging would risk reading the wrong sectors, so the whole "
+                "partition will be imaged instead. The files themselves read "
+                "correctly either way.",
+            )
+        self._rebuild_file_tree(announce=announce, offer_unlock=False)
+        self._set_tree_files_view()
+        return True
+
     def _offer_unlock(self) -> bool:
         """If the image holds a locked volume, offer to unlock it. True if done."""
         if self._unlocked is not None or self._unlock_declined:
             return False
         volumes = self._find_locked_volumes()
         if not volumes:
-            return False
+            # No BitLocker volume — a Mac disk is the other thing that reads as
+            # "no filesystem here", so look for CoreStorage before giving up.
+            return self._offer_corestorage_unlock()
         first = volumes[0]
         resp = QMessageBox.question(
             self, "BitLocker volume found",
@@ -714,6 +848,26 @@ class MainWindow(QMainWindow):
             return False
         return self._unlock_bitlocker(volumes=volumes)
 
+    def _offer_corestorage_unlock(self) -> bool:
+        """As :meth:`_offer_unlock`, for a Mac FileVault 2 disk."""
+        volumes = self._find_corestorage_volumes()
+        if not volumes:
+            return False
+        first = volumes[0]
+        resp = QMessageBox.question(
+            self, "FileVault 2 volume found",
+            f"The volume at offset 0x{first.offset:X} is a CoreStorage volume "
+            f"encrypted with FileVault 2 ({first.method_name}), so its files "
+            f"can't be read yet.\n\n"
+            f"Identifier: {first.identifier or '—'}\n\n"
+            "Unlock it now with the disk's password?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if resp != QMessageBox.Yes:
+            self._unlock_declined = True
+            return False
+        return self._unlock_corestorage(volumes=volumes)
+
     def _clear_unlock(self, new_image: str | None = None) -> None:
         """Drop any unlocked volume — a new session is opening an image.
 
@@ -723,6 +877,11 @@ class MainWindow(QMainWindow):
         for path in (self.output, new_image):
             if path:
                 decrypt.unregister(path)
+        # A CoreStorage source holds libfvde handles onto the image; drop them
+        # rather than leaving them open for the life of the process.
+        closer = getattr(self._unlocked, "close", None)
+        if closer is not None:
+            closer()
         self._unlocked = None
         self._unlock_declined = False
 
@@ -734,7 +893,8 @@ class MainWindow(QMainWindow):
         else:
             text = f"0x{self.volume_offset:X} ({self.volume_offset:,} B)"
         if self._unlocked is not None:
-            text += f" — BitLocker unlocked ({self._unlocked.method_name})"
+            text += (f" — {self._unlocked.scheme_name} unlocked "
+                     f"({self._unlocked.method_name})")
         self.status_panel.set_field("volume", text)
 
     def _import_logfile(self) -> None:
