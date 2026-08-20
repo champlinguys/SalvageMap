@@ -76,7 +76,12 @@ jobs:
             ```
 
             apt pulls in PySide6, python3-cryptography, GNU ddrescue, ntfs-3g
-            and the Qt xcb libraries automatically. Launch **SalvageMap** from your applications menu (it
+            and the Qt xcb libraries automatically, plus `python3-libfvde` for
+            Mac FileVault 2 (CoreStorage) unlocking — that one is a
+            *recommendation*, so `--no-install-recommends` leaves it out and
+            only that feature is unavailable.
+
+            Launch **SalvageMap** from your applications menu (it
             prompts for a password to access raw disks), or run `salvagemap` from
             a terminal.
 

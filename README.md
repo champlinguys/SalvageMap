@@ -110,19 +110,20 @@ It requires **Ubuntu 24.04 or newer** (that's where apt ships the
 (under *Assets*). Or grab it from a terminal:
 
 ```sh
-wget https://github.com/champlinguys/SalvageMap/releases/download/v0.2.0/salvagemap_0.2.0_all.deb
+wget https://github.com/champlinguys/SalvageMap/releases/download/v0.3.0/salvagemap_0.3.0_all.deb
 ```
 
 **2. Install** it — double-click the file to open it in Ubuntu's software
 installer, or run:
 
 ```sh
-sudo apt install ./salvagemap_0.2.0_all.deb
+sudo apt install ./salvagemap_0.3.0_all.deb
 ```
 
 apt pulls in PySide6, python3-cryptography, GNU ddrescue, ntfs-3g and
-the Qt xcb libraries
-automatically.
+the Qt xcb libraries automatically, plus `python3-libfvde` for Mac FileVault 2
+(CoreStorage) unlocking — that one is a *recommendation*, so `--no-install-recommends`
+leaves it out and only that feature is unavailable.
 
 **3. Launch** **SalvageMap** from your applications menu (it prompts for a
 password so it can read raw disks), or run `salvagemap` from a terminal.
